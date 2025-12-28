@@ -65,8 +65,43 @@ GetDocValueBM25Computer(float k1, float b, float avgdl) {
     };
 }
 
+// Iterator over valid doc IDs in a sorted vector (whitelist).
+// Used for zipper merge optimization in sparse index search.
+class ValidVectorDocIdIterator {
+ public:
+    ValidVectorDocIdIterator() = default;
+
+    ValidVectorDocIdIterator(const table_t* data, size_t size) : data_(data), size_(size) {
+    }
+
+    [[nodiscard]] bool
+    has_next() const {
+        return pos_ < size_;
+    }
+
+    [[nodiscard]] size_t
+    current() const {
+        return data_[pos_];
+    }
+
+    void
+    advance_to_ge(size_t target) {
+        if (pos_ >= size_ || data_[pos_] >= target) {
+            return;
+        }
+        auto it = std::lower_bound(data_ + pos_, data_ + size_, static_cast<table_t>(target));
+        pos_ = it - data_;
+    }
+
+ private:
+    const table_t* data_ = nullptr;
+    size_t size_ = 0;
+    size_t pos_ = 0;
+};
+
 // A docid filter that tests whether a given id is in the list of docids, which is regarded as another form of BitSet.
 // Note that all ids to be tested must be tested exactly once and in order.
+// This filter keeps (passes) only the doc IDs in the list - it's a whitelist filter.
 class DocIdFilterByVector {
  public:
     DocIdFilterByVector(std::vector<table_t>&& docids) : docids_(std::move(docids)) {
@@ -85,6 +120,12 @@ class DocIdFilterByVector {
     [[nodiscard]] bool
     empty() const {
         return docids_.empty();
+    }
+
+    // Returns an iterator over valid doc IDs for zipper merge optimization.
+    [[nodiscard]] ValidVectorDocIdIterator
+    valid_doc_iterator() const {
+        return ValidVectorDocIdIterator(docids_.data(), docids_.size());
     }
 
  private:

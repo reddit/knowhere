@@ -18,10 +18,12 @@
 
 #include <boost/core/span.hpp>
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <new>
 #include <unordered_map>
 #include <vector>
 
@@ -36,6 +38,72 @@
 #include "knowhere/utils.h"
 
 namespace knowhere::sparse {
+
+// 64-byte aligned allocator for cache-line aligned memory access
+// Ensures posting list data sits on cache line boundaries for optimal SIMD/prefetch performance
+template <typename T, std::size_t Alignment = 64>
+struct AlignedAllocator {
+    using value_type = T;
+    using size_type = std::size_t;
+    using difference_type = std::ptrdiff_t;
+    using propagate_on_container_move_assignment = std::true_type;
+    using is_always_equal = std::true_type;
+
+    constexpr AlignedAllocator() noexcept = default;
+
+    template <typename U>
+    constexpr AlignedAllocator(const AlignedAllocator<U, Alignment>&) noexcept {
+    }
+
+    [[nodiscard]] T*
+    allocate(std::size_t n) {
+        if (n > std::numeric_limits<std::size_t>::max() / sizeof(T)) {
+            throw std::bad_array_new_length();
+        }
+        void* ptr = nullptr;
+#ifdef _WIN32
+        ptr = _aligned_malloc(n * sizeof(T), Alignment);
+        if (!ptr) {
+            throw std::bad_alloc();
+        }
+#else
+        if (posix_memalign(&ptr, Alignment, n * sizeof(T)) != 0) {
+            throw std::bad_alloc();
+        }
+#endif
+        return static_cast<T*>(ptr);
+    }
+
+    void
+    deallocate(T* p, [[maybe_unused]] std::size_t n) noexcept {
+#ifdef _WIN32
+        _aligned_free(p);
+#else
+        std::free(p);
+#endif
+    }
+
+    template <typename U>
+    struct rebind {
+        using other = AlignedAllocator<U, Alignment>;
+    };
+};
+
+template <typename T, typename U, std::size_t Alignment>
+bool
+operator==(const AlignedAllocator<T, Alignment>&, const AlignedAllocator<U, Alignment>&) noexcept {
+    return true;
+}
+
+template <typename T, typename U, std::size_t Alignment>
+bool
+operator!=(const AlignedAllocator<T, Alignment>&, const AlignedAllocator<U, Alignment>&) noexcept {
+    return false;
+}
+
+// Cache-line aligned vector for posting lists
+template <typename T>
+using AlignedVector = std::vector<T, AlignedAllocator<T, 64>>;
 
 enum class InvertedIndexAlgo {
     TAAT_NAIVE,
@@ -165,8 +233,10 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
 #endif
     }
 
+    // Use cache-line aligned vectors for posting lists in non-mmapped mode
+    // This ensures optimal SIMD load and cache line fetch alignment
     template <typename U>
-    using Vector = std::conditional_t<mmapped, GrowableVectorView<U>, std::vector<U>>;
+    using Vector = std::conditional_t<mmapped, GrowableVectorView<U>, AlignedVector<U>>;
 
     void
     SetBM25Params(float k1, float b, float avgdl) {
@@ -974,6 +1044,8 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
         return scores;
     }
 
+    // Cursor for iterating over posting list with filter support.
+    // Uses galloping search for seek() and linear scan for next().
     template <typename DocIdFilter>
     struct Cursor {
      public:
@@ -986,7 +1058,7 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
               max_score_(max_score),
               q_value_(q_value),
               filter_(filter) {
-            skip_filtered_ids();
+            skip_filtered_linear();
             update_cur_vec_id();
         }
         Cursor(const Cursor& rhs) = delete;
@@ -995,16 +1067,24 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
         void
         next() {
             ++loc_;
-            skip_filtered_ids();
+            // Use simple linear scan for next() - this is the hot path
+            skip_filtered_linear();
             update_cur_vec_id();
         }
 
         void
         seek(table_t vec_id) {
-            while (loc_ < plist_size_ && plist_ids_[loc_] < vec_id) {
-                ++loc_;
+            if (loc_ >= plist_size_) {
+                return;
             }
-            skip_filtered_ids();
+
+            // Use galloping search to find position >= vec_id
+            // Galloping is O(log d) where d = distance,,
+            loc_ = gallop_ge(loc_, vec_id);
+
+            // After seek, use simple linear filter test
+            // Linear scan is CPU-efficient: sequential access, predictable branches,
+            skip_filtered_linear();
             update_cur_vec_id();
         }
 
@@ -1029,11 +1109,52 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
             cur_vec_id_ = (loc_ >= plist_size_) ? total_num_vec_ : plist_ids_[loc_];
         }
 
+        // Fast linear scan - best for sequential next() operations
+        // CPU-efficient: sequential memory access, predictable branches
         inline void
-        skip_filtered_ids() {
-            while (loc_ < plist_size_ && !filter_.empty() && filter_.test(plist_ids_[loc_])) {
+        skip_filtered_linear() {
+            if (filter_.empty()) {
+                return;
+            }
+            while (loc_ < plist_size_ && filter_.test(plist_ids_[loc_])) {
                 ++loc_;
             }
+        }
+
+        // Galloping (exponential) search: O(log d) where d is distance to target
+        // Much faster than binary search when target is close
+        // CPU-efficient: exponential phase is sequential (cache-friendly),
+        // binary search phase operates on a small range
+        inline size_t
+        gallop_ge(size_t start, table_t target) const {
+            if (start >= plist_size_ || plist_ids_[start] >= target) {
+                return start;
+            }
+
+            // Exponential search: find range containing target
+            // This phase is cache-friendly (sequential doubling)
+            size_t step = 1;
+            size_t lo = start;
+            size_t hi = start + step;
+
+            while (hi < plist_size_ && plist_ids_[hi] < target) {
+                lo = hi;
+                step *= 2;
+                hi = lo + step;
+            }
+            hi = std::min(hi, plist_size_);
+
+            // Binary search within the found range
+            // Range is at most 2x the distance, so this is fast
+            while (lo < hi) {
+                size_t mid = lo + (hi - lo) / 2;
+                if (plist_ids_[mid] < target) {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+            return lo;
         }
     };  // struct Cursor
 
