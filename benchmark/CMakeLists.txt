@@ -12,47 +12,82 @@
 include_directories(${CMAKE_SOURCE_DIR})
 include_directories(${CMAKE_SOURCE_DIR}/include)
 
-find_package(HDF5 REQUIRED)
-include_directories(${HDF5_INCLUDE_DIRS})
-
-find_package(GTest REQUIRED)
-set(unittest_libs
-        GTest::gtest
-        GTest::gtest_main)
-
-set(depend_libs
+set(base_depend_libs
         knowhere
-        ${HDF5_LIBRARIES}
         )
 
 if(WITH_PROFILER)
-    set(depend_libs
-        ${depend_libs}
+    set(base_depend_libs
+        ${base_depend_libs}
         tcmalloc_and_profiler
     )
 endif()
 
 #==============================================================================
-macro(benchmark_test target file)
-    set(FILE_SRCS ${file})
-    add_executable(${target} ${FILE_SRCS})
-    target_link_libraries(${target} ${depend_libs} ${unittest_libs})
+# Sparse benchmark using Catch2 (doesn't require HDF5 or GTest)
+find_package(Catch2)
+if(NOT Catch2_FOUND)
+    message("Catch2 not found, fetching Catch2 from github")
+    Include(FetchContent)
+    FetchContent_Declare(
+        Catch2
+        GIT_REPOSITORY https://github.com/catchorg/Catch2.git
+        GIT_TAG v3.3.1
+    )
+    FetchContent_MakeAvailable(Catch2)
+endif()
 
-    # this is needed for clang in Debug compilation mode
-    target_link_libraries(${target} atomic)
+add_executable(benchmark_sparse hdf5/benchmark_sparse.cpp)
+target_link_libraries(benchmark_sparse PRIVATE
+        ${base_depend_libs}
+        Catch2::Catch2WithMain
+        atomic)
+install(TARGETS benchmark_sparse DESTINATION unittest)
 
-    install(TARGETS ${target} DESTINATION unittest)
-endmacro()
+#==============================================================================
+# HDF5 and GTest-dependent benchmarks
+find_package(HDF5)
+find_package(GTest)
 
-benchmark_test(benchmark_binary                hdf5/benchmark_binary.cpp)
-benchmark_test(benchmark_binary_range          hdf5/benchmark_binary_range.cpp)
-benchmark_test(benchmark_float                 hdf5/benchmark_float.cpp)
-benchmark_test(benchmark_float_bitset          hdf5/benchmark_float_bitset.cpp)
-benchmark_test(benchmark_float_qps             hdf5/benchmark_float_qps.cpp)
-benchmark_test(benchmark_float_range           hdf5/benchmark_float_range.cpp)
-benchmark_test(benchmark_float_range_bitset    hdf5/benchmark_float_range_bitset.cpp)
-benchmark_test(benchmark_simd_qps              hdf5/benchmark_simd_qps.cpp)
-benchmark_test(benchmark_zipper_merge          hdf5/benchmark_zipper_merge.cpp)
+if(HDF5_FOUND AND GTest_FOUND)
+    include_directories(${HDF5_INCLUDE_DIRS})
+    set(unittest_libs
+            GTest::gtest
+            GTest::gtest_main)
 
-benchmark_test(gen_hdf5_file hdf5/gen_hdf5_file.cpp)
-benchmark_test(gen_fbin_file hdf5/gen_fbin_file.cpp)
+    set(depend_libs
+            ${base_depend_libs}
+            ${HDF5_LIBRARIES}
+            )
+
+    macro(benchmark_test target file)
+        set(FILE_SRCS ${file})
+        add_executable(${target} ${FILE_SRCS})
+        target_link_libraries(${target} ${depend_libs} ${unittest_libs})
+
+        # this is needed for clang in Debug compilation mode
+        target_link_libraries(${target} atomic)
+
+        install(TARGETS ${target} DESTINATION unittest)
+    endmacro()
+
+    benchmark_test(benchmark_binary                hdf5/benchmark_binary.cpp)
+    benchmark_test(benchmark_binary_range          hdf5/benchmark_binary_range.cpp)
+    benchmark_test(benchmark_float                 hdf5/benchmark_float.cpp)
+    benchmark_test(benchmark_float_bitset          hdf5/benchmark_float_bitset.cpp)
+    benchmark_test(benchmark_float_qps             hdf5/benchmark_float_qps.cpp)
+    benchmark_test(benchmark_float_range           hdf5/benchmark_float_range.cpp)
+    benchmark_test(benchmark_float_range_bitset    hdf5/benchmark_float_range_bitset.cpp)
+    benchmark_test(benchmark_simd_qps              hdf5/benchmark_simd_qps.cpp)
+    benchmark_test(benchmark_zipper_merge          hdf5/benchmark_zipper_merge.cpp)
+
+    benchmark_test(gen_hdf5_file hdf5/gen_hdf5_file.cpp)
+    benchmark_test(gen_fbin_file hdf5/gen_fbin_file.cpp)
+else()
+    if(NOT HDF5_FOUND)
+        message(WARNING "HDF5 not found. HDF5-dependent benchmarks will not be built.")
+    endif()
+    if(NOT GTest_FOUND)
+        message(WARNING "GTest not found. GTest-dependent benchmarks will not be built.")
+    endif()
+endif()
