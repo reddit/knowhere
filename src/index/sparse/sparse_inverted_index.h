@@ -24,6 +24,8 @@
 #include <iostream>
 #include <memory>
 #include <new>
+#include <optional>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
@@ -36,6 +38,7 @@
 #include "knowhere/prometheus_client.h"
 #include "knowhere/sparse_utils.h"
 #include "knowhere/utils.h"
+#include "simd/sparse_simd.h"
 
 namespace knowhere::sparse {
 
@@ -169,11 +172,12 @@ class BaseInvertedIndex {
 
     virtual void
     Search(const SparseRow<T>& query, size_t k, float* distances, label_t* labels, const BitsetView& bitset,
-           const DocValueComputer<T>& computer, InvertedIndexApproxSearchParams& approx_params) const = 0;
+           const DocValueComputer<T>& computer, InvertedIndexApproxSearchParams& approx_params,
+           std::optional<float> bm25_avgdl = std::nullopt) const = 0;
 
     virtual std::vector<float>
     GetAllDistances(const SparseRow<T>& query, float drop_ratio_search, const BitsetView& bitset,
-                    const DocValueComputer<T>& computer) const = 0;
+                    const DocValueComputer<T>& computer, std::optional<float> bm25_avgdl = std::nullopt) const = 0;
 
     virtual float
     GetRawDistance(const label_t vec_id, const SparseRow<T>& query, const DocValueComputer<T>& computer) const = 0;
@@ -971,7 +975,8 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
 
     void
     Search(const SparseRow<DType>& query, size_t k, float* distances, label_t* labels, const BitsetView& bitset,
-           const DocValueComputer<float>& computer, InvertedIndexApproxSearchParams& approx_params) const override {
+           const DocValueComputer<float>& computer, InvertedIndexApproxSearchParams& approx_params,
+           std::optional<float> bm25_avgdl = std::nullopt) const override {
         // initially set result distances to NaN and labels to -1
         std::fill(distances, distances + k, std::numeric_limits<float>::quiet_NaN());
         std::fill(labels, labels + k, -1);
@@ -991,20 +996,21 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
         } else if constexpr (algo == InvertedIndexAlgo::DAAT_MAXSCORE) {
             search_daat_maxscore(q_vec, heap, bitset, computer, approx_params.dim_max_score_ratio);
         } else {
-            search_taat_naive(q_vec, heap, bitset, computer);
+            search_taat_naive(q_vec, heap, bitset, computer, bm25_avgdl);
         }
 
         if (approx_params.refine_factor == 1) {
             collect_result(heap, distances, labels);
         } else {
-            refine_and_collect(query, heap, k, distances, labels, computer, approx_params);
+            refine_and_collect(query, heap, k, distances, labels, computer, approx_params, bm25_avgdl);
         }
     }
 
     // Returned distances are inaccurate based on the drop_ratio.
     std::vector<float>
     GetAllDistances(const SparseRow<DType>& query, float drop_ratio_search, const BitsetView& bitset,
-                    const DocValueComputer<float>& computer) const override {
+                    const DocValueComputer<float>& computer,
+                    std::optional<float> bm25_avgdl = std::nullopt) const override {
         if (query.size() == 0) {
             return {};
         }
@@ -1014,7 +1020,7 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
         }
         auto q_vec = parse_query(query, drop_ratio_search);
 
-        auto distances = compute_all_distances(q_vec, computer);
+        auto distances = compute_all_distances(q_vec, computer, bm25_avgdl);
         if (!bitset.empty()) {
             for (size_t i = 0; i < distances.size(); ++i) {
                 if (bitset.test(i)) {
@@ -1106,16 +1112,85 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
 
     std::vector<float>
     compute_all_distances(const std::vector<std::pair<size_t, DType>>& q_vec,
-                          const DocValueComputer<float>& computer) const {
+                          const DocValueComputer<float>& computer,
+                          std::optional<float> bm25_avgdl = std::nullopt) const {
         std::vector<float> scores(n_rows_internal_, 0.0f);
-        for (size_t i = 0; i < q_vec.size(); ++i) {
-            auto& plist_ids = inverted_index_ids_spans_[q_vec[i].first];
-            auto& plist_vals = inverted_index_vals_spans_[q_vec[i].first];
-            for (size_t j = 0; j < plist_ids.size(); ++j) {
-                auto doc_id = plist_ids[j];
-                float val_sum =
-                    metric_type_ == SparseMetricType::METRIC_BM25 ? bm25_params_->row_sums_spans_[doc_id] : 0;
-                scores[doc_id] += q_vec[i].second * computer(plist_vals[j], val_sum);
+
+        // Check metric type once outside the loop for better performance
+        const bool use_bm25 = (metric_type_ == SparseMetricType::METRIC_BM25 && bm25_params_);
+
+        if (use_bm25) {
+            // BM25 metric: avgdl is REQUIRED for BM25 searches (validated in GetDocValueComputer)
+            // Use SIMD-optimized accumulation for both float and uint16_t
+            for (size_t i = 0; i < q_vec.size(); ++i) {
+                auto& plist_ids = inverted_index_ids_spans_[q_vec[i].first];
+                auto& plist_vals = inverted_index_vals_spans_[q_vec[i].first];
+                float q_weight = q_vec[i].second;
+
+                if constexpr (std::is_same_v<QType, float>) {
+                    knowhere::sparse::sparse_accumulate_scores_bm25(
+                        scores.data(),
+                        plist_ids.data(),
+                        plist_vals.data(),
+                        bm25_params_->row_sums_spans_.data(),
+                        plist_ids.size(),
+                        q_weight,
+                        bm25_params_->k1,
+                        bm25_params_->b,
+                        bm25_avgdl.value_or(1.0f)
+                    );
+                } else if constexpr (std::is_same_v<QType, uint16_t>) {
+                    knowhere::sparse::sparse_accumulate_scores_bm25_u16(
+                        scores.data(),
+                        plist_ids.data(),
+                        plist_vals.data(),
+                        bm25_params_->row_sums_spans_.data(),
+                        plist_ids.size(),
+                        q_weight,
+                        bm25_params_->k1,
+                        bm25_params_->b,
+                        bm25_avgdl.value_or(1.0f)
+                    );
+                } else {
+                    //TODO: Warn here in the logs
+                    // Fallback for other QType (should not happen in practice)
+                    for (size_t j = 0; j < plist_ids.size(); ++j) {
+                        auto doc_id = plist_ids[j];
+                        float val_sum = bm25_params_->row_sums_spans_[doc_id];
+                        scores[doc_id] += q_weight * computer(plist_vals[j], val_sum);
+                    }
+                }
+            }
+        } else {
+            // IP metric: use SIMD-optimized IP accumulation
+            for (size_t i = 0; i < q_vec.size(); ++i) {
+                auto& plist_ids = inverted_index_ids_spans_[q_vec[i].first];
+                auto& plist_vals = inverted_index_vals_spans_[q_vec[i].first];
+                float q_weight = q_vec[i].second;
+
+                if constexpr (std::is_same_v<QType, float>) {
+                    knowhere::sparse::sparse_accumulate_scores_ip(
+                        scores.data(),
+                        plist_ids.data(),
+                        plist_vals.data(),
+                        plist_ids.size(),
+                        q_weight
+                    );
+                } else if constexpr (std::is_same_v<QType, uint16_t>) {
+                    knowhere::sparse::sparse_accumulate_scores_ip_u16(
+                        scores.data(),
+                        plist_ids.data(),
+                        plist_vals.data(),
+                        plist_ids.size(),
+                        q_weight
+                    );
+                } else {
+                     //TODO: Warn here in the logs
+                    // Fallback for other QType (should not happen in practice)
+                    for (size_t j = 0; j < plist_ids.size(); ++j) {
+                        scores[plist_ids[j]] += q_weight * static_cast<float>(plist_vals[j]);
+                    }
+                }
             }
         }
         return scores;
@@ -1350,8 +1425,9 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
     template <typename DocIdFilter>
     void
     search_taat_naive(const std::vector<std::pair<size_t, DType>>& q_vec, MaxMinHeap<float>& heap, DocIdFilter& filter,
-                      const DocValueComputer<float>& computer) const {
-        auto scores = compute_all_distances(q_vec, computer);
+                      const DocValueComputer<float>& computer,
+                      std::optional<float> bm25_avgdl = std::nullopt) const {
+        auto scores = compute_all_distances(q_vec, computer, bm25_avgdl);
         for (size_t i = 0; i < n_rows_internal_; ++i) {
             if ((filter.empty() || !filter.test(i)) && scores[i] != 0) {
                 heap.push(i, scores[i]);
@@ -1553,7 +1629,8 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
     void
     refine_and_collect(const SparseRow<DType>& query, MaxMinHeap<float>& inacc_heap, size_t k, float* distances,
                        label_t* labels, const DocValueComputer<float>& computer,
-                       InvertedIndexApproxSearchParams& approx_params) const {
+                       InvertedIndexApproxSearchParams& approx_params,
+                       std::optional<float> bm25_avgdl = std::nullopt) const {
         std::vector<table_t> docids;
         MaxMinHeap<float> heap(k);
 
@@ -1577,7 +1654,7 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
         } else if constexpr (algo == InvertedIndexAlgo::DAAT_MAXSCORE) {
             search_daat_maxscore(q_vec, heap, filter, computer, dim_max_score_ratio);
         } else {
-            search_taat_naive(q_vec, heap, filter, computer);
+            search_taat_naive(q_vec, heap, filter, computer, bm25_avgdl);
         }
         collect_result(heap, distances, labels);
     }
@@ -1699,6 +1776,12 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
 
         DocValueComputer<float> max_score_computer;
 
+        // Note: avgdl is NOT stored here because it's a search-time parameter.
+        // In BM25, avgdl can vary per search based on:
+        // - Filtered document sets having different average lengths
+        // - Distributed systems computing global avgdl across segments
+        // - Dynamic corpora where documents are added/removed
+        // The max_score_computer uses a fixed avgdl for upper bound computation only.
         BM25Params(float k1, float b, float avgdl)
             : k1(k1), b(b), max_score_computer(GetDocValueBM25Computer<float>(k1, b, avgdl)) {
         }

@@ -131,12 +131,16 @@ class SparseInvertedIndexNode : public IndexNode {
         auto p_id = std::make_unique<sparse::label_t[]>(nq * k);
         auto p_dist = std::make_unique<float[]>(nq * k);
 
+        // Extract bm25_avgdl for SIMD-optimized BM25 computation
+        auto bm25_avgdl = cfg.bm25_avgdl;
+
         std::vector<folly::Future<folly::Unit>> futs;
         futs.reserve(nq);
         for (int64_t idx = 0; idx < nq; ++idx) {
             futs.emplace_back(search_pool_->push([&, idx = idx, p_id = p_id.get(), p_dist = p_dist.get()]() {
                 knowhere::checkCancellation(op_context);
-                index_->Search(queries[idx], k, p_dist + idx * k, p_id + idx * k, bitset, computer, approx_params);
+                index_->Search(queries[idx], k, p_dist + idx * k, p_id + idx * k, bitset, computer, approx_params,
+                               bm25_avgdl);
             }));
         }
         WaitAllSuccess(futs);
@@ -205,6 +209,7 @@ class SparseInvertedIndexNode : public IndexNode {
         }
         auto computer = computer_or.value();
         auto drop_ratio_search = cfg.drop_ratio_search.value_or(0.0f);
+        auto bm25_avgdl = cfg.bm25_avgdl;  // For SIMD-optimized BM25 computation
 
         // TODO: set approximated to false for now since the refinement is too slow after forward index is removed.
         const bool approximated = false;
@@ -217,7 +222,7 @@ class SparseInvertedIndexNode : public IndexNode {
                 auto compute_dist_func = [=]() -> std::vector<DistId> {
                     auto queries = static_cast<const sparse::SparseRow<value_type>*>(dataset->GetTensor());
                     std::vector<float> distances =
-                        index_->GetAllDistances(queries[i], drop_ratio_search, bitset, computer);
+                        index_->GetAllDistances(queries[i], drop_ratio_search, bitset, computer, bm25_avgdl);
                     std::vector<DistId> distances_ids;
                     // 30% is a ratio guesstimate of non-zero distances: probability of 2 random sparse splade
                     // vectors(100 non zero dims out of 30000 total dims) sharing at least 1 common non-zero

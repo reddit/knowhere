@@ -46,6 +46,17 @@
 
 #include "distances_ref.h"
 
+// Sparse index SIMD support
+#include "sparse_simd.h"
+#include "sparse_simd_ref.h"
+#if defined(__x86_64__)
+#include "sparse_simd_avx.h"
+#include "sparse_simd_avx512.h"
+#endif
+#if defined(__ARM_NEON) || defined(__aarch64__)
+#include "sparse_simd_neon.h"
+#endif
+
 namespace faiss {
 
 #if defined(__x86_64__)
@@ -117,6 +128,24 @@ decltype(u32_jaccard_distance_batch_4) u32_jaccard_distance_batch_4 = u32_jaccar
 decltype(u64_jaccard_distance) u64_jaccard_distance = u64_jaccard_distance_ref;
 decltype(minhash_lsh_hit) minhash_lsh_hit = minhash_lsh_hit_ref;
 decltype(u64_jaccard_distance_batch_4) u64_jaccard_distance_batch_4 = u64_jaccard_distance_batch_4_ref;
+///////////////////////////////////////////////////////////////////////////////
+
+}  // namespace faiss
+
+// Sparse index SIMD function pointers (in knowhere::sparse namespace)
+namespace knowhere {
+namespace sparse {
+
+decltype(sparse_find_max_float) sparse_find_max_float = sparse_find_max_float_ref;
+decltype(sparse_accumulate_scores_ip) sparse_accumulate_scores_ip = sparse_accumulate_scores_ip_ref;
+decltype(sparse_accumulate_scores_bm25) sparse_accumulate_scores_bm25 = sparse_accumulate_scores_bm25_ref;
+decltype(sparse_accumulate_scores_ip_u16) sparse_accumulate_scores_ip_u16 = sparse_accumulate_scores_ip_u16_ref;
+decltype(sparse_accumulate_scores_bm25_u16) sparse_accumulate_scores_bm25_u16 = sparse_accumulate_scores_bm25_u16_ref;
+
+}  // namespace sparse
+}  // namespace knowhere
+
+namespace faiss {
 ///////////////////////////////////////////////////////////////////////////////
 #if defined(__x86_64__)
 bool
@@ -613,10 +642,37 @@ fvec_hook(std::string& simd_type) {
 #endif
 }
 
+// Hook initialization for sparse index SIMD functions
+void
+sparse_simd_hook() {
+#if defined(__x86_64__)
+    if (use_avx512 && cpu_support_avx512()) {
+        knowhere::sparse::sparse_find_max_float = knowhere::sparse::sparse_find_max_float_avx512;
+        knowhere::sparse::sparse_accumulate_scores_ip = knowhere::sparse::sparse_accumulate_scores_ip_avx512;
+        knowhere::sparse::sparse_accumulate_scores_bm25 = knowhere::sparse::sparse_accumulate_scores_bm25_avx512;
+        knowhere::sparse::sparse_accumulate_scores_ip_u16 = knowhere::sparse::sparse_accumulate_scores_ip_u16_avx512;
+        knowhere::sparse::sparse_accumulate_scores_bm25_u16 = knowhere::sparse::sparse_accumulate_scores_bm25_u16_avx512;
+    } else if (use_avx2 && cpu_support_avx2()) {
+        knowhere::sparse::sparse_find_max_float = knowhere::sparse::sparse_find_max_float_avx;
+        knowhere::sparse::sparse_accumulate_scores_ip = knowhere::sparse::sparse_accumulate_scores_ip_avx;
+        knowhere::sparse::sparse_accumulate_scores_bm25 = knowhere::sparse::sparse_accumulate_scores_bm25_avx;
+        knowhere::sparse::sparse_accumulate_scores_ip_u16 = knowhere::sparse::sparse_accumulate_scores_ip_u16_avx;
+        knowhere::sparse::sparse_accumulate_scores_bm25_u16 = knowhere::sparse::sparse_accumulate_scores_bm25_u16_avx;
+    }
+#elif defined(__aarch64__)
+    knowhere::sparse::sparse_find_max_float = knowhere::sparse::sparse_find_max_float_neon;
+    knowhere::sparse::sparse_accumulate_scores_ip = knowhere::sparse::sparse_accumulate_scores_ip_neon;
+    knowhere::sparse::sparse_accumulate_scores_bm25 = knowhere::sparse::sparse_accumulate_scores_bm25_neon;
+    knowhere::sparse::sparse_accumulate_scores_ip_u16 = knowhere::sparse::sparse_accumulate_scores_ip_u16_neon;
+    knowhere::sparse::sparse_accumulate_scores_bm25_u16 = knowhere::sparse::sparse_accumulate_scores_bm25_u16_neon;
+#endif
+}
+
 static int init_hook_ = []() {
     std::string simd_type;
     fvec_hook(simd_type);
     faiss::sq_hook();
+    sparse_simd_hook();  // Initialize sparse SIMD functions
     return 0;
 }();
 
