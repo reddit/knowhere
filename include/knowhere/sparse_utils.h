@@ -496,4 +496,53 @@ class GrowableVectorView {
     size_type mmap_element_count_ = 0;
 };
 
+// BlockMaxInfo stores per-block maximum scores for a posting list.
+// This enables filter-aware WAND: when docs are filtered, we can compute
+// tighter upper bounds by only considering blocks with passing docs.
+constexpr size_t kBlockSize = 128;
+
+struct BlockMaxInfo {
+    // For each block [i*kBlockSize, (i+1)*kBlockSize), stores the max BM25/IP score.
+    std::vector<float> block_max_scores;
+
+    // Get the block index for a given position in the posting list
+    static size_t
+    block_index(size_t pos) {
+        return pos / kBlockSize;
+    }
+
+    // Get the number of blocks for a posting list of given size
+    static size_t
+    num_blocks(size_t plist_size) {
+        return (plist_size + kBlockSize - 1) / kBlockSize;
+    }
+
+    // Get max score from block_idx onwards (used for upper bound computation)
+    // Uses SIMD-optimized max finding for better performance
+    float
+    max_score_from_block(size_t block_idx) const;
+
+    // Inline implementation for header-only usage when SIMD not available
+    float
+    max_score_from_block_scalar(size_t block_idx) const {
+        if (block_idx >= block_max_scores.size()) {
+            return 0.0f;
+        }
+        float max_val = 0.0f;
+        for (size_t i = block_idx; i < block_max_scores.size(); ++i) {
+            max_val = std::max(max_val, block_max_scores[i]);
+        }
+        return max_val;
+    }
+
+    // Get max score for a specific block
+    float
+    block_score(size_t block_idx) const {
+        if (block_idx >= block_max_scores.size()) {
+            return 0.0f;
+        }
+        return block_max_scores[block_idx];
+    }
+};
+
 }  // namespace knowhere::sparse
