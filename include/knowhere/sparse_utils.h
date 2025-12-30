@@ -518,13 +518,8 @@ struct BlockMaxInfo {
     }
 
     // Get max score from block_idx onwards (used for upper bound computation)
-    // Uses SIMD-optimized max finding for better performance
     float
-    max_score_from_block(size_t block_idx) const;
-
-    // Inline implementation for header-only usage when SIMD not available
-    float
-    max_score_from_block_scalar(size_t block_idx) const {
+    max_score_from_block(size_t block_idx) const {
         if (block_idx >= block_max_scores.size()) {
             return 0.0f;
         }
