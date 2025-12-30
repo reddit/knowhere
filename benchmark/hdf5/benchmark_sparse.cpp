@@ -296,12 +296,43 @@ TEST_CASE("Benchmark_sparse: TEST_BM25_SEARCH", "[benchmark][sparse][bm25]") {
 
     auto gt = GenerateGroundTruth(train_ds, query_ds, metric, topk, {}, data_config.num_docs);
 
+    printf("\n--- BM25 Search WITHOUT Filters ---\n");
     for (const auto& algo : algorithms) {
         auto index = BuildIndex(train_ds, algo, metric);
 
         std::string test_name = algo + "_BM25_k" + std::to_string(topk);
         auto stats = BenchmarkSearch(index, query_ds, gt, metric, topk, 0.0f, {}, data_config.num_docs);
         PrintBenchmarkResults(test_name, stats);
+    }
+
+    // Test with filters to exercise seek() path
+    printf("\n--- BM25 Search WITH Filters (exercises galloping search) ---\n");
+    std::vector<float> filter_ratios = {0.3f, 0.5f, 0.7f};
+    std::vector<FilterDistribution> filter_dists = {
+        FilterDistribution::RANDOM,
+        FilterDistribution::REVERSE_POSTING_ORDER
+    };
+
+    for (const auto& algo : algorithms) {
+        if (algo == "TAAT_NAIVE") continue;  // Skip naive for filtered tests
+
+        auto index = BuildIndex(train_ds, algo, metric);
+
+        for (float filter_ratio : filter_ratios) {
+            for (auto filter_dist : filter_dists) {
+                FilterConfig filter_config;
+                filter_config.distribution = filter_dist;
+                filter_config.filter_ratio = filter_ratio;
+
+                auto filter_data = GenFilterBitset(data_config.num_docs, filter_config);
+                auto filtered_gt = GenerateGroundTruth(train_ds, query_ds, metric, topk, filter_data, data_config.num_docs);
+
+                std::string test_name = algo + "_BM25_filter_" + FilterDistributionToString(filter_dist) + "_" +
+                                        std::to_string(static_cast<int>(filter_ratio * 100)) + "pct";
+                auto stats = BenchmarkSearch(index, query_ds, filtered_gt, metric, topk, 0.0f, filter_data, data_config.num_docs);
+                PrintBenchmarkResults(test_name, stats);
+            }
+        }
     }
 }
 
