@@ -16,6 +16,12 @@ set(base_depend_libs
         knowhere
         )
 
+# Find OpenBLAS if available (needed by milvus-common)
+find_package(OpenBLAS QUIET)
+if(OpenBLAS_FOUND)
+    list(APPEND base_depend_libs OpenBLAS::OpenBLAS)
+endif()
+
 if(WITH_PROFILER)
     set(base_depend_libs
         ${base_depend_libs}
