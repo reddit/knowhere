@@ -153,17 +153,22 @@ endif()
 
 
 if(LINUX)
-  set(BLA_VENDOR OpenBLAS)
-endif()
-
-if(APPLE)
-  set(BLA_VENDOR Apple)
-endif()
-
-if(CMAKE_SYSTEM_NAME STREQUAL "Android" AND CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
+  # On Linux, use OpenBLAS from Conan which provides both BLAS and LAPACK
   find_package(OpenBLAS REQUIRED)
   set(BLAS_LIBRARIES OpenBLAS::OpenBLAS)
+  set(LAPACK_LIBRARIES OpenBLAS::OpenBLAS)
+elseif(APPLE)
+  # On macOS, use Apple's Accelerate framework
+  set(BLA_VENDOR Apple)
+  find_package(LAPACK REQUIRED)
+  find_package(BLAS REQUIRED)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Android" AND CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
+  # On Android ARM64, use OpenBLAS from Conan
+  find_package(OpenBLAS REQUIRED)
+  set(BLAS_LIBRARIES OpenBLAS::OpenBLAS)
+  set(LAPACK_LIBRARIES OpenBLAS::OpenBLAS)
 else()
+  # Fallback for other platforms
   find_package(LAPACK REQUIRED)
   find_package(BLAS REQUIRED)
 endif()

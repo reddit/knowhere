@@ -111,10 +111,11 @@ class KnowhereConan(ConanFile):
         self.requires("libcurl/8.2.1")
         self.requires("simde/0.8.2")
         self.requires("xxhash/0.8.3")
-        if self.settings.os == "Android":
+        # OpenBLAS provides BLAS/LAPACK and is needed for FAISS on Linux and Android
+        if self.settings.os == "Android" or self.settings.os == "Linux":
             self.requires("openblas/0.3.27")
         # OpenBLAS is needed by milvus-common on all platforms when building benchmarks
-        if self.options.with_benchmark:
+        if self.options.with_benchmark and self.settings.os not in ["Android", "Linux"]:
             self.requires("openblas/0.3.27")
         if not self.options.with_light:
             self.requires("opentelemetry-cpp/1.8.1.1@milvus/dev")

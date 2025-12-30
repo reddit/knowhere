@@ -1070,6 +1070,9 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
             // Use simple linear scan for next() - this is the hot path
             skip_filtered_linear();
             update_cur_vec_id();
+
+            // Debug instrumentation
+            next_calls_++;
         }
 
         void
@@ -1077,6 +1080,10 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
             if (loc_ >= plist_size_) {
                 return;
             }
+
+            // Track seek distance for analysis
+            table_t old_vec_id = cur_vec_id_;
+            size_t old_loc = loc_;
 
             // Use galloping search to find position >= vec_id
             // Galloping is O(log d) where d = distance,,
@@ -1086,6 +1093,12 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
             // Linear scan is CPU-efficient: sequential access, predictable branches,
             skip_filtered_linear();
             update_cur_vec_id();
+
+            // Debug instrumentation
+            seek_calls_++;
+            if (cur_vec_id_ >= vec_id) {
+                seek_distance_sum_ += (loc_ - old_loc);
+            }
         }
 
         QType
@@ -1102,6 +1115,11 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
         float q_value_ = 0.0f;
         DocIdFilter filter_;
         table_t cur_vec_id_ = 0;
+
+        // Debug instrumentation
+        mutable size_t next_calls_ = 0;
+        mutable size_t seek_calls_ = 0;
+        mutable size_t seek_distance_sum_ = 0;
 
      private:
         inline void
@@ -1276,6 +1294,21 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
                 }
             }
         }
+
+        // Print cursor statistics for debugging
+        static bool print_stats = std::getenv("KNOWHERE_CURSOR_STATS") != nullptr;
+        if (print_stats) {
+            size_t total_next = 0, total_seek = 0, total_seek_dist = 0;
+            for (const auto& cursor : cursors) {
+                total_next += cursor.next_calls_;
+                total_seek += cursor.seek_calls_;
+                total_seek_dist += cursor.seek_distance_sum_;
+            }
+            LOG_KNOWHERE_INFO_ << "[DAAT_WAND] Cursors: " << cursors.size()
+                               << " | next(): " << total_next
+                               << " | seek(): " << total_seek
+                               << " (avg dist: " << (total_seek > 0 ? total_seek_dist / total_seek : 0) << ")";
+        }
     }
 
     template <typename DocIdFilter>
@@ -1365,6 +1398,21 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
                     }
                 }
             }
+        }
+
+        // Print cursor statistics for debugging
+        static bool print_stats = std::getenv("KNOWHERE_CURSOR_STATS") != nullptr;
+        if (print_stats) {
+            size_t total_next = 0, total_seek = 0, total_seek_dist = 0;
+            for (const auto& cursor : cursors) {
+                total_next += cursor.next_calls_;
+                total_seek += cursor.seek_calls_;
+                total_seek_dist += cursor.seek_distance_sum_;
+            }
+            LOG_KNOWHERE_INFO_ << "[DAAT_MAXSCORE] Cursors: " << cursors.size()
+                               << " | next(): " << total_next
+                               << " | seek(): " << total_seek
+                               << " (avg dist: " << (total_seek > 0 ? total_seek_dist / total_seek : 0) << ")";
         }
     }
 
