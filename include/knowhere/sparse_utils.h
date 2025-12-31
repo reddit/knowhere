@@ -505,6 +505,10 @@ struct BlockMaxInfo {
     // For each block [i*kBlockSize, (i+1)*kBlockSize), stores the max BM25/IP score.
     std::vector<float> block_max_scores;
 
+    // Precomputed suffix maximums for O(1) lookup: suffix_max[i] = max(block_max_scores[i..end])
+    // This avoids the O(blocks) linear scan that was causing massive slowdown with filters.
+    std::vector<float> suffix_max;
+
     // Get the block index for a given position in the posting list
     static size_t
     block_index(size_t pos) {
@@ -517,22 +521,30 @@ struct BlockMaxInfo {
         return (plist_size + kBlockSize - 1) / kBlockSize;
     }
 
-    // Get max score from block_idx onwards (used for upper bound computation)
-    // Uses SIMD-optimized max finding for better performance
-    float
-    max_score_from_block(size_t block_idx) const;
+    // Build suffix max array for O(1) lookups. Call this after building block_max_scores.
+    // This precomputes the maximum score from each block to the end of the posting list.
+    void
+    build_suffix_max() {
+        suffix_max.resize(block_max_scores.size());
+        if (block_max_scores.empty()) {
+            return;
+        }
 
-    // Inline implementation for header-only usage when SIMD not available
+        // Work backwards: suffix_max[i] = max(block_max_scores[i], suffix_max[i+1])
+        suffix_max.back() = block_max_scores.back();
+        for (int i = static_cast<int>(block_max_scores.size()) - 2; i >= 0; --i) {
+            suffix_max[i] = std::max(block_max_scores[i], suffix_max[i + 1]);
+        }
+    }
+
+    // Get max score from block_idx onwards (used for upper bound computation)
+    // OPTIMIZED: O(1) lookup using precomputed suffix_max instead of O(blocks) linear scan
     float
-    max_score_from_block_scalar(size_t block_idx) const {
-        if (block_idx >= block_max_scores.size()) {
+    max_score_from_block(size_t block_idx) const {
+        if (block_idx >= suffix_max.size()) {
             return 0.0f;
         }
-        float max_val = 0.0f;
-        for (size_t i = block_idx; i < block_max_scores.size(); ++i) {
-            max_val = std::max(max_val, block_max_scores[i]);
-        }
-        return max_val;
+        return suffix_max[block_idx];
     }
 
     // Get max score for a specific block

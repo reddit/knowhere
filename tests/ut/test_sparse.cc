@@ -9,6 +9,7 @@
 // is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
 // or implied. See the License for the specific language governing permissions and limitations under the License.
 
+#include <cstring>
 #include <future>
 #include <thread>
 
@@ -587,7 +588,7 @@ TEST_CASE("Test Mem Sparse Index CC", "[float metrics]") {
 
 namespace {
 // Helper: Manually compute expected block max scores for a posting list
-std::vector<float>
+[[maybe_unused]] std::vector<float>
 ComputeExpectedBlockMaxScores(const std::vector<float>& plist_vals, const std::vector<float>& row_sums,
                                const std::vector<uint32_t>& plist_ids, bool use_bm25, float k1, float b,
                                float avgdl) {
@@ -1331,7 +1332,7 @@ TEST_CASE("Test Block Max Edge Cases", "[block_max][edge_cases]") {
         auto idx = knowhere::IndexFactory::Instance().Create<knowhere::sparse_u32_f32>(
             knowhere::IndexEnum::INDEX_SPARSE_WAND, version).value();
         REQUIRE(idx.Build(train_ds, json) == knowhere::Status::success);
-        REQUIRE(idx.Count() == large_size);
+        REQUIRE(idx.Count() == static_cast<int64_t>(large_size));
 
         // Expected: 79 blocks (10000 / 128 = 78.125, rounds up to 79)
         size_t expected_blocks = (large_size + kBlockSize - 1) / kBlockSize;
@@ -1463,7 +1464,7 @@ TEST_CASE("Test Block Max WAND Regression", "[block_max][regression]") {
     }
 
     SECTION("DAAT_WAND vs DAAT_MAXSCORE Consistency") {
-        if (algo != "DAAT_WAND") {
+        if (std::strcmp(algo, "DAAT_WAND") != 0) {
             return;  // Only run once
         }
 
