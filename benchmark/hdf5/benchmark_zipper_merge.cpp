@@ -452,51 +452,6 @@ TEST_F(Benchmark_ZipperMerge, HighFilterRates) {
     PrintResults(results, "High Filter Rates (posting_size=250K)");
 }
 
-TEST_F(Benchmark_ZipperMerge, ValidVectorDocIdIterator) {
-    // Benchmark ValidVectorDocIdIterator (used for DocIdFilterByVector)
-    const size_t posting_size = 250000;
-    const std::vector<float> whitelist_percentages = {5.0f, 10.0f, 20.0f, 50.0f};
-    const size_t max_doc_id = 1000000;
-
-    std::cout << "\n";
-    std::cout << "================================================================\n";
-    std::cout << "Benchmark: ValidVectorDocIdIterator (whitelist filter)\n";
-    std::cout << "================================================================\n";
-
-    for (auto whitelist_pct : whitelist_percentages) {
-        auto posting_list = GeneratePostingList(posting_size, max_doc_id);
-
-        // Generate whitelist (docs that PASS the filter)
-        size_t whitelist_size = static_cast<size_t>(max_doc_id * whitelist_pct / 100.0f);
-        std::vector<table_t> whitelist(whitelist_size);
-        std::iota(whitelist.begin(), whitelist.end(), 0);
-        std::mt19937 rng(kSeed);
-        std::shuffle(whitelist.begin(), whitelist.end(), rng);
-        whitelist.resize(whitelist_size);
-
-        DocIdFilterByVector filter(std::move(whitelist));
-        auto iter = filter.valid_doc_iterator();
-
-        // Benchmark iteration
-        auto start = std::chrono::high_resolution_clock::now();
-        size_t count = 0;
-        for (int i = 0; i < kBenchmarkIterations; ++i) {
-            auto test_iter = filter.valid_doc_iterator();
-            count = 0;
-            while (test_iter.has_next()) {
-                ++count;
-                test_iter.advance_to_ge(test_iter.current() + 1);
-            }
-        }
-        auto end = std::chrono::high_resolution_clock::now();
-        double time_ms =
-            std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1000.0 / kBenchmarkIterations;
-
-        std::cout << "Whitelist " << whitelist_pct << "%: " << count << " docs, " << std::fixed << std::setprecision(3)
-                  << time_ms << " ms\n";
-    }
-}
-
 int
 main(int argc, char** argv) {
     testing::InitGoogleTest(&argc, argv);

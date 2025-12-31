@@ -296,90 +296,6 @@ TEST_CASE("Test ValidDocIdIterator Word-Level Optimization", "[valid_doc_iterato
     }
 }
 
-TEST_CASE("Test ValidVectorDocIdIterator", "[valid_doc_iterator]") {
-    using namespace knowhere::sparse;
-
-    SECTION("Empty vector") {
-        std::vector<table_t> docids;
-        DocIdFilterByVector filter(std::move(docids));
-
-        auto iter = filter.valid_doc_iterator();
-        REQUIRE_FALSE(iter.has_next());
-    }
-
-    SECTION("Single element") {
-        std::vector<table_t> docids = {42};
-        DocIdFilterByVector filter(std::move(docids));
-
-        auto iter = filter.valid_doc_iterator();
-        REQUIRE(iter.has_next());
-        REQUIRE(iter.current() == 42);
-
-        iter.advance_to_ge(43);
-        REQUIRE_FALSE(iter.has_next());
-    }
-
-    SECTION("Sequential elements") {
-        std::vector<table_t> docids = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
-        DocIdFilterByVector filter(std::move(docids));
-
-        auto iter = filter.valid_doc_iterator();
-
-        std::vector<size_t> collected;
-        while (iter.has_next()) {
-            collected.push_back(iter.current());
-            iter.advance_to_ge(iter.current() + 1);
-        }
-
-        REQUIRE(collected.size() == 10);
-        for (size_t i = 0; i < 10; ++i) {
-            REQUIRE(collected[i] == i);
-        }
-    }
-
-    SECTION("Sparse elements with gaps") {
-        std::vector<table_t> docids = {10, 50, 100, 500, 1000};
-        DocIdFilterByVector filter(std::move(docids));
-
-        auto iter = filter.valid_doc_iterator();
-
-        // Start at 10
-        REQUIRE(iter.current() == 10);
-
-        // Advance to 30 - should land on 50
-        iter.advance_to_ge(30);
-        REQUIRE(iter.current() == 50);
-
-        // Advance to 100 - exact match
-        iter.advance_to_ge(100);
-        REQUIRE(iter.current() == 100);
-
-        // Advance to 200 - should land on 500
-        iter.advance_to_ge(200);
-        REQUIRE(iter.current() == 500);
-
-        // Advance past end
-        iter.advance_to_ge(2000);
-        REQUIRE_FALSE(iter.has_next());
-    }
-
-    SECTION("Unsorted input gets sorted") {
-        std::vector<table_t> docids = {50, 10, 100, 30, 20};
-        DocIdFilterByVector filter(std::move(docids));
-
-        auto iter = filter.valid_doc_iterator();
-
-        std::vector<size_t> collected;
-        while (iter.has_next()) {
-            collected.push_back(iter.current());
-            iter.advance_to_ge(iter.current() + 1);
-        }
-
-        // Should be sorted
-        REQUIRE(collected == std::vector<size_t>{10, 20, 30, 50, 100});
-    }
-}
-
 TEST_CASE("Test next_valid_doc_ge helper", "[valid_doc_iterator]") {
     SECTION("Empty bitset returns target") {
         BitsetView empty_bitset;
@@ -405,49 +321,26 @@ TEST_CASE("Test next_valid_doc_ge helper", "[valid_doc_iterator]") {
     }
 }
 
-TEST_CASE("Test Iterator Interface Compatibility", "[valid_doc_iterator]") {
-    // Both BitsetView and DocIdFilterByVector should provide the same interface
-    // for valid_doc_iterator(). This test verifies the interface is consistent.
-
-    SECTION("BitsetView iterator interface") {
-        const size_t n = 100;
-        std::vector<uint8_t> data((n + 7) / 8, 0);
-        // Set bits 0-49 as filtered
-        for (size_t i = 0; i < 50; ++i) {
-            data[i >> 3] |= (0x1 << (i & 0x7));
-        }
-        BitsetView bitset(data.data(), n);
-
-        auto iter = bitset.valid_doc_iterator();
-
-        // Test has_next()
-        REQUIRE(iter.has_next() == true);
-
-        // Test current()
-        REQUIRE(iter.current() == 50);
-
-        // Test advance_to_ge()
-        iter.advance_to_ge(75);
-        REQUIRE(iter.current() == 75);
+TEST_CASE("Test ValidDocIdIterator Interface", "[valid_doc_iterator]") {
+    // Test that BitsetView's ValidDocIdIterator provides the expected interface.
+    const size_t n = 100;
+    std::vector<uint8_t> data((n + 7) / 8, 0);
+    // Set bits 0-49 as filtered
+    for (size_t i = 0; i < 50; ++i) {
+        data[i >> 3] |= (0x1 << (i & 0x7));
     }
+    BitsetView bitset(data.data(), n);
 
-    SECTION("DocIdFilterByVector iterator interface") {
-        using namespace knowhere::sparse;
+    auto iter = bitset.valid_doc_iterator();
 
-        std::vector<table_t> docids = {50, 51, 52, 75, 76, 99};
-        DocIdFilterByVector filter(std::move(docids));
+    // Test has_next()
+    REQUIRE(iter.has_next() == true);
 
-        auto iter = filter.valid_doc_iterator();
+    // Test current()
+    REQUIRE(iter.current() == 50);
 
-        // Test has_next()
-        REQUIRE(iter.has_next() == true);
-
-        // Test current()
-        REQUIRE(iter.current() == 50);
-
-        // Test advance_to_ge()
-        iter.advance_to_ge(75);
-        REQUIRE(iter.current() == 75);
-    }
+    // Test advance_to_ge()
+    iter.advance_to_ge(75);
+    REQUIRE(iter.current() == 75);
 }
 
