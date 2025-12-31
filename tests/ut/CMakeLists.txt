@@ -48,6 +48,7 @@ set_target_properties(knowhere_tests PROPERTIES
 )
 
 target_link_libraries(knowhere_tests PRIVATE
+        Catch2::Catch2
         Catch2::Catch2WithMain
         atomic
         stdc++fs

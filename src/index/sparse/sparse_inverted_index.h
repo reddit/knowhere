@@ -860,6 +860,11 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
             return;  // Block max only needed for WAND/MaxScore algorithms
         }
 
+        LOG_KNOWHERE_DEBUG_ << "[BUILD_BLOCK_MAX_INFO] Starting: from_scratch=" << from_scratch
+                           << " nr_inner_dims=" << nr_inner_dims_
+                           << " block_max_info_.size()=" << block_max_info_.size()
+                           << " metric_type=" << (metric_type_ == SparseMetricType::METRIC_BM25 ? "BM25" : "IP");
+
         // Resize to match current number of dimensions (handles new dimensions added)
         if (block_max_info_.size() < nr_inner_dims_) {
             block_max_info_.resize(nr_inner_dims_);
@@ -911,6 +916,22 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
                     std::max(block_max_info_[dim_id].block_max_scores[block_idx], score);
             }
         }
+
+        // Build O(1) suffix max lookups for efficient position-aware bounds
+        for (size_t dim_id = 0; dim_id < nr_inner_dims_; ++dim_id) {
+            if (!block_max_info_[dim_id].block_max_scores.empty()) {
+                block_max_info_[dim_id].build_suffix_max();
+            }
+        }
+
+        // DEBUG: Log statistics
+        // size_t total_blocks = 0;
+        // for (const auto& info : block_max_info_) {
+        //     total_blocks += info.block_max_scores.size();
+        // }
+        // LOG_KNOWHERE_DEBUG_ << "[BUILD_BLOCK_MAX_INFO] Complete: total_blocks=" << total_blocks
+        //                    << " avg_blocks_per_dim=" << (nr_inner_dims_ > 0 ? (float)total_blocks / nr_inner_dims_ : 0)
+        //                    << " [OPTIMIZATION: O(1) suffix_max enabled]";
     }
 
     Status
@@ -1379,7 +1400,17 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
         // Filter-aware mode is beneficial when filter ratio is significant
         const bool use_filter_aware = !filter.empty() && !block_max_info_.empty();
 
+        // DEBUG: Log filter-aware status
+        size_t filter_aware_count = 0;
+        size_t non_filter_aware_count = 0;
+        size_t total_iterations = 0;
+        LOG_KNOWHERE_DEBUG_ << "[WAND] use_filter_aware=" << use_filter_aware
+                           << " filter.empty()=" << filter.empty()
+                           << " block_max_info_.empty()=" << block_max_info_.empty()
+                           << " block_max_info_.size()=" << block_max_info_.size();
+
         while (true) {
+            ++total_iterations;
             float threshold = heap.full() ? heap.top().val : 0;
             float upper_bound = 0;
             size_t pivot;
@@ -1392,9 +1423,21 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
                 // Use filter-aware max score when available
                 // This gives tighter bounds when many docs are filtered
                 if (use_filter_aware) {
-                    upper_bound += cursor_ptrs[pivot]->max_score_from_here();
+                    float filter_aware_score = cursor_ptrs[pivot]->max_score_from_here();
+                    upper_bound += filter_aware_score;
+                    ++filter_aware_count;
+                    // DEBUG: Log first 4 AND every 5000th iteration to see progression
+                    if (total_iterations < 5 || (total_iterations % 5000 == 0 && total_iterations < 20000)) {
+                        LOG_KNOWHERE_DEBUG_ << "  [WAND iter " << total_iterations
+                                           << "] pivot=" << pivot
+                                           << " filter_aware_score=" << filter_aware_score
+                                           << " global_max=" << cursor_ptrs[pivot]->max_score_
+                                           << " block=" << cursor_ptrs[pivot]->current_block_
+                                           << " loc=" << cursor_ptrs[pivot]->loc_;
+                    }
                 } else {
                     upper_bound += cursor_ptrs[pivot]->max_score_;
+                    ++non_filter_aware_count;
                 }
                 if (upper_bound > threshold) {
                     found_pivot = true;
@@ -1402,6 +1445,10 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
                 }
             }
             if (!found_pivot) {
+                // DEBUG: Log summary before breaking
+                LOG_KNOWHERE_DEBUG_ << "[WAND] Search complete: iterations=" << total_iterations
+                                   << " filter_aware_path=" << filter_aware_count
+                                   << " non_filter_aware_path=" << non_filter_aware_count;
                 break;
             }
 
@@ -1449,6 +1496,13 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
         // Determine if we should use filter-aware bounds
         const bool use_filter_aware = !filter.empty() && !block_max_info_.empty();
 
+        // DEBUG: Log filter-aware status
+        size_t filter_aware_recompute_count = 0;
+        LOG_KNOWHERE_DEBUG_ << "[MAXSCORE] use_filter_aware=" << use_filter_aware
+                           << " filter.empty()=" << filter.empty()
+                           << " block_max_info_.empty()=" << block_max_info_.empty()
+                           << " block_max_info_.size()=" << block_max_info_.size();
+
         // Compute initial upper bounds
         // With filter-aware mode, we use block-level max scores from current position
         std::vector<float> upper_bounds(cursors.size());
@@ -1475,6 +1529,8 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
         while (first_ne_idx != 0 && upper_bounds[first_ne_idx - 1] <= threshold) {
             --first_ne_idx;
             if (first_ne_idx == 0) {
+                LOG_KNOWHERE_DEBUG_ << "[MAXSCORE] Search complete (early exit - all non-essential): "
+                                   << "filter_aware_recomputes=" << filter_aware_recompute_count;
                 return;
             }
         }
@@ -1487,6 +1543,8 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
             while (found_cand == false) {
                 // start find from next_vec_id
                 if (next_cand_vec_id >= n_rows_internal_) {
+                    LOG_KNOWHERE_DEBUG_ << "[MAXSCORE] Search complete (exhausted docs): "
+                                       << "filter_aware_recomputes=" << filter_aware_recompute_count;
                     return;
                 }
                 // get current candidate vector
@@ -1517,10 +1575,17 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
                 // Recompute upper bounds only when cursors crossed block boundaries
                 // This gives tighter bounds while avoiding expensive recomputation every iteration
                 if (any_cursor_moved) {
+                    ++filter_aware_recompute_count;
                     bound_sum = 0.0;
                     for (size_t i = cursors.size() - 1; i + 1 > 0; --i) {
                         bound_sum += cursors[i].max_score_from_here();
                         upper_bounds[i] = bound_sum;
+                    }
+                    // DEBUG: Log first few recomputes
+                    if (filter_aware_recompute_count <= 3) {
+                        LOG_KNOWHERE_DEBUG_ << "  [MAXSCORE recompute #" << filter_aware_recompute_count
+                                           << "] cand_id=" << curr_cand_vec_id
+                                           << " new_bound_sum=" << bound_sum;
                     }
                 }
 
@@ -1543,11 +1608,15 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
                 while (first_ne_idx != 0 && upper_bounds[first_ne_idx - 1] <= threshold) {
                     --first_ne_idx;
                     if (first_ne_idx == 0) {
+                        LOG_KNOWHERE_DEBUG_ << "[MAXSCORE] Search complete (early exit): "
+                                           << "filter_aware_recomputes=" << filter_aware_recompute_count;
                         return;
                     }
                 }
             }
         }
+        LOG_KNOWHERE_DEBUG_ << "[MAXSCORE] Search complete: "
+                           << "filter_aware_recomputes=" << filter_aware_recompute_count;
     }
 
     void
