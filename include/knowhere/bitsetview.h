@@ -380,25 +380,6 @@ class BitsetView {
         return buf.str();
     }
 
-    // Create an iterator over valid (non-filtered) doc IDs.
-    // Used for efficient zipper merge in sparse index search.
-    [[nodiscard]] ValidDocIdIterator
-    valid_doc_iterator() const {
-        return ValidDocIdIterator(bits_, num_bits_, out_ids_, num_internal_ids_, id_offset_);
-    }
-
-    // Find the next valid doc ID >= target.
-    // Returns size() if no such ID exists.
-    // This is a one-shot operation; for repeated use, prefer valid_doc_iterator().
-    [[nodiscard]] size_t
-    next_valid_doc_ge(size_t target) const {
-        if (empty()) {
-            return target;  // No filter, all pass
-        }
-        ValidDocIdIterator iter(bits_, num_bits_, out_ids_, num_internal_ids_, id_offset_);
-        iter.advance_to_ge(target);
-        return iter.has_next() ? iter.current() : size();
-    }
 
  private:
     const uint8_t* bits_ = nullptr;
