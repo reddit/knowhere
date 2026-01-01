@@ -122,12 +122,6 @@ class DocIdFilterByVector {
         return docids_.empty();
     }
 
-    // Returns an iterator over valid doc IDs for zipper merge optimization.
-    [[nodiscard]] ValidVectorDocIdIterator
-    valid_doc_iterator() const {
-        return ValidVectorDocIdIterator(docids_.data(), docids_.size());
-    }
-
  private:
     std::vector<table_t> docids_;
     size_t pos_ = 0;
