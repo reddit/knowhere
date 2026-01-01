@@ -20,6 +20,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
+#include <numeric>
 #include <fstream>
 #include <iostream>
 #include <memory>
@@ -380,7 +381,7 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
         auto load_progress_interval = rows / 10;
         for (int64_t i = 0; i < rows; ++i) {
             if (load_progress_interval > 0 && i % load_progress_interval == 0) {
-                LOG_KNOWHERE_INFO_ << "Sparse Inverted Index loading progress: " << (i / load_progress_interval * 10)
+                LOG_KNOWHERE_DEBUG_ << "Sparse Inverted Index loading progress: " << (i / load_progress_interval * 10)
                                    << "%";
             }
 
@@ -401,7 +402,7 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
             index_dataset_nnz_len_histogram_->Observe(count);
 #endif
         }
-        LOG_KNOWHERE_INFO_ << "Sparse Inverted Index loading progress: 100%";
+        LOG_KNOWHERE_DEBUG_ << "Sparse Inverted Index loading progress: 100%";
 
 #if defined(NOT_COMPILE_FOR_SWIG) && !defined(KNOWHERE_WITH_LIGHT)
         for (size_t i = 0; i < dim_map_.size(); ++i) {
@@ -931,11 +932,11 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
         // DEBUG: Log statistics
         // size_t total_blocks = 0;
         // for (const auto& info : block_max_info_) {
-        //     total_blocks += info.block_max_scores.size();
+        //    total_blocks += info.block_max_scores.size();
         // }
         // LOG_KNOWHERE_DEBUG_ << "[BUILD_BLOCK_MAX_INFO] Complete: total_blocks=" << total_blocks
-        //                    << " avg_blocks_per_dim=" << (nr_inner_dims_ > 0 ? (float)total_blocks / nr_inner_dims_ : 0)
-        //                    << " [OPTIMIZATION: O(1) suffix_max enabled]";
+        //                   << " avg_blocks_per_dim=" << (nr_inner_dims_ > 0 ? (float)total_blocks / nr_inner_dims_ : 0)
+        //                   << " [OPTIMIZATION: O(1) suffix_max enabled]";
     }
 
     Status
@@ -1567,10 +1568,62 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
 
         std::vector<Cursor<DocIdFilter>> cursors = make_cursors(q_vec, filter, dim_max_score_ratio);
 
-        float threshold = heap.full() ? heap.top().val : 0;
-
         // Determine if we should use filter-aware bounds
         const bool use_filter_aware = !filter.empty() && !block_max_info_.empty();
+
+        // ============================================================
+        // Filter-aware re-sorting with selectivity tie-breaker
+        // ============================================================
+        // When a filter is active, re-sort cursors by max_score_from_here() which
+        // uses block-level max scores from the cursor's current position. This gives
+        // tighter bounds when filters remove high-scoring documents in early blocks.
+        //
+        // Selectivity tie-breaker: When two cursors have similar max_score_from_here(),
+        // prefer the one with shorter posting list. This ensures that if threshold rises
+        // high enough that only ONE cursor remains essential, it's the most selective one
+        // (fewer candidates to iterate).
+        if (use_filter_aware) {
+            constexpr float EPSILON = 0.5f;  // Tie-breaker threshold for "similar" scores
+
+            // Create index array for indirect sorting
+            std::vector<size_t> order(cursors.size());
+            std::iota(order.begin(), order.end(), 0);
+
+            std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+                float max_a = cursors[a].max_score_from_here();
+                float max_b = cursors[b].max_score_from_here();
+
+                // Primary sort: higher effective max_score first (descending)
+                if (std::abs(max_a - max_b) > EPSILON) {
+                    return max_a > max_b;
+                }
+                // Secondary sort (tie-breaker): shorter posting list first
+                // This ensures when threshold reduces essential cursors to one,
+                // it's the most selective one (fewer candidates)
+                return cursors[a].plist_size_ < cursors[b].plist_size_;
+            });
+
+            // Check if reordering is actually needed (avoid unnecessary moves)
+            bool needs_reorder = false;
+            for (size_t i = 0; i < order.size(); ++i) {
+                if (order[i] != i) {
+                    needs_reorder = true;
+                    break;
+                }
+            }
+
+            if (needs_reorder) {
+                LOG_KNOWHERE_DEBUG_ << "[MAXSCORE] Reordering cursors due to filter-aware bounds";
+                std::vector<Cursor<DocIdFilter>> reordered;
+                reordered.reserve(cursors.size());
+                for (size_t idx : order) {
+                    reordered.push_back(std::move(cursors[idx]));
+                }
+                cursors = std::move(reordered);
+            }
+        }
+
+        float threshold = heap.full() ? heap.top().val : 0;
 
         // DEBUG: Log filter-aware status
         size_t filter_aware_recompute_count = 0;
