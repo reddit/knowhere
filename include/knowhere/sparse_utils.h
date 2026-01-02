@@ -493,6 +493,10 @@ class GrowableVectorView {
 // BlockMaxInfo stores per-block maximum scores for a posting list.
 // This enables filter-aware WAND: when docs are filtered, we can compute
 // tighter upper bounds by only considering blocks with passing docs.
+// Block size trades off granularity vs overhead:
+// - 128: Fine-grained bounds, good for filtered queries
+// - Build cost is O(total_nnz) regardless of block size
+// - Finer granularity only helps when blocks ARE used (filtered queries)
 constexpr size_t kBlockSize = 128;
 
 struct BlockMaxInfo {

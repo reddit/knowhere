@@ -337,6 +337,61 @@ TEST_CASE("Benchmark_sparse: TEST_BM25_SEARCH", "[benchmark][sparse][bm25]") {
 }
 
 // ============================================================================
+// Test: Quick BM25 Filter test with DAAT MaxScore (0.7f filter ratio only)
+// ============================================================================
+TEST_CASE("Benchmark_sparse: TEST_QUICK_BM25_FILTER_MAXSCORE", "[benchmark][sparse][bm25][quick]") {
+    g_T0.reset();
+    knowhere::KnowhereConfig::SetSimdType(knowhere::KnowhereConfig::SimdType::AUTO);
+
+    printf("\n[%.3f s] TEST_QUICK_BM25_FILTER_MAXSCORE\n", g_T0.elapsed_seconds());
+    printf("================================================================================\n");
+
+    DataGenConfig data_config;
+    data_config.num_docs = 50000;  // Smaller dataset for quick test
+    data_config.num_dims = 30000;
+    data_config.doc_sparsity = 0.97f;
+    data_config.query_sparsity = 0.99f;
+    data_config.num_queries = 50;  // Fewer queries for quick test
+    data_config.distribution = DataDistribution::ZIPF;
+    data_config.use_integer_values = true;
+    data_config.max_tf = 256;
+
+    printf("[%.3f s] Generating BM25 data: %d docs, %d dims, Zipf distribution\n", g_T0.elapsed_seconds(),
+           data_config.num_docs, data_config.num_dims);
+
+    auto train_ds = GenSparseDataSetWithDistribution(data_config);
+    auto query_ds = GenSparseQuerySet(data_config);
+
+    std::string algorithm = "DAAT_MAXSCORE";
+    std::string metric = knowhere::metric::BM25;
+    int32_t topk = 10;
+    float filter_ratio = 0.7f;  // Only test 0.7f filter ratio
+
+    // Test with filters to exercise seek() path
+    printf("\n--- BM25 Search WITH 70%% Filters (DAAT_MAXSCORE only) ---\n");
+
+    auto index = BuildIndex(train_ds, algorithm, metric);
+
+    std::vector<FilterDistribution> filter_dists = {
+        FilterDistribution::RANDOM,
+        FilterDistribution::REVERSE_POSTING_ORDER
+    };
+
+    for (auto filter_dist : filter_dists) {
+        FilterConfig filter_config;
+        filter_config.distribution = filter_dist;
+        filter_config.filter_ratio = filter_ratio;
+
+        auto filter_data = GenFilterBitset(data_config.num_docs, filter_config);
+        auto filtered_gt = GenerateGroundTruth(train_ds, query_ds, metric, topk, filter_data, data_config.num_docs);
+
+        std::string test_name = algorithm + "_BM25_filter_" + FilterDistributionToString(filter_dist) + "_70pct";
+        auto stats = BenchmarkSearch(index, query_ds, filtered_gt, metric, topk, 0.0f, filter_data, data_config.num_docs);
+        PrintBenchmarkResults(test_name, stats);
+    }
+}
+
+// ============================================================================
 // Test: Search with different filter ratios and distributions
 // This is critical for evaluating seek-fix and filter-aware-wand optimizations
 // ============================================================================
