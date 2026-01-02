@@ -134,9 +134,10 @@ class SparseInvertedIndexNode : public IndexNode {
         std::vector<folly::Future<folly::Unit>> futs;
         futs.reserve(nq);
         for (int64_t idx = 0; idx < nq; ++idx) {
-            futs.emplace_back(search_pool_->push([&, idx = idx, p_id = p_id.get(), p_dist = p_dist.get()]() {
+            futs.emplace_back(search_pool_->push([&, idx = idx, p_id_raw = p_id.get(), p_dist_raw = p_dist.get()]() {
                 knowhere::checkCancellation(op_context);
-                index_->Search(queries[idx], k, p_dist + idx * k, p_id + idx * k, bitset, computer, approx_params);
+                index_->Search(queries[idx], k, p_dist_raw + idx * k, p_id_raw + idx * k,
+                              bitset, computer, approx_params);
             }));
         }
         WaitAllSuccess(futs);

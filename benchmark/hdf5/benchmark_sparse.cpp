@@ -11,6 +11,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <thread>
 #include <vector>
 
 #include "benchmark_sparse.h"
@@ -232,7 +233,7 @@ TEST_CASE("Benchmark_sparse: TEST_SEARCH_ALGORITHMS", "[benchmark][sparse]") {
     data_config.num_docs = 100000;
     data_config.num_dims = 30000;
     data_config.doc_sparsity = 0.97f;  // ~900 non-zeros per doc
-    data_config.query_sparsity = 0.99f;
+    data_config.query_sparsity = 0.9998f;  // ~6 terms per query instead of 300
     data_config.num_queries = 100;
     data_config.distribution = DataDistribution::UNIFORM;
 
@@ -278,7 +279,7 @@ TEST_CASE("Benchmark_sparse: TEST_BM25_SEARCH", "[benchmark][sparse][bm25]") {
     data_config.num_docs = 100000;
     data_config.num_dims = 30000;
     data_config.doc_sparsity = 0.97f;
-    data_config.query_sparsity = 0.99f;
+    data_config.query_sparsity = 0.9998f;  // ~6 terms per query instead of 300
     data_config.num_queries = 100;
     data_config.distribution = DataDistribution::ZIPF;
     data_config.use_integer_values = true;
@@ -342,6 +343,8 @@ TEST_CASE("Benchmark_sparse: TEST_BM25_SEARCH", "[benchmark][sparse][bm25]") {
 TEST_CASE("Benchmark_sparse: TEST_QUICK_BM25_FILTER_MAXSCORE", "[benchmark][sparse][bm25][quick]") {
     g_T0.reset();
     knowhere::KnowhereConfig::SetSimdType(knowhere::KnowhereConfig::SimdType::AUTO);
+    // Use all available CPU cores for maximum QPS
+    knowhere::KnowhereConfig::SetSearchThreadPoolSize(std::thread::hardware_concurrency());
 
     printf("\n[%.3f s] TEST_QUICK_BM25_FILTER_MAXSCORE\n", g_T0.elapsed_seconds());
     printf("================================================================================\n");
@@ -350,13 +353,13 @@ TEST_CASE("Benchmark_sparse: TEST_QUICK_BM25_FILTER_MAXSCORE", "[benchmark][spar
     data_config.num_docs = 50000;  // Smaller dataset for quick test
     data_config.num_dims = 30000;
     data_config.doc_sparsity = 0.97f;
-    data_config.query_sparsity = 0.99f;
+    data_config.query_sparsity = 0.9998f;  // ~6 terms per query instead of 300
     data_config.num_queries = 50;  // Fewer queries for quick test
     data_config.distribution = DataDistribution::ZIPF;
     data_config.use_integer_values = true;
     data_config.max_tf = 256;
 
-    printf("[%.3f s] Generating BM25 data: %d docs, %d dims, Zipf distribution\n", g_T0.elapsed_seconds(),
+    printf("[%.3f s] Generating BM25 data: %d docs, %d dims, Zipf distribution (~6 terms/query)\n", g_T0.elapsed_seconds(),
            data_config.num_docs, data_config.num_dims);
 
     auto train_ds = GenSparseDataSetWithDistribution(data_config);
@@ -365,10 +368,10 @@ TEST_CASE("Benchmark_sparse: TEST_QUICK_BM25_FILTER_MAXSCORE", "[benchmark][spar
     std::string algorithm = "DAAT_MAXSCORE";
     std::string metric = knowhere::metric::BM25;
     int32_t topk = 10;
-    float filter_ratio = 0.7f;  // Only test 0.7f filter ratio
+    std::vector<float> filter_ratios = {0.7f, 0.9f};  // Test both 70% and 90% filter ratios
 
     // Test with filters to exercise seek() path
-    printf("\n--- BM25 Search WITH 70%% Filters (DAAT_MAXSCORE only) ---\n");
+    printf("\n--- BM25 Search WITH 70%% and 90%% Filters (DAAT_MAXSCORE only) ---\n");
 
     auto index = BuildIndex(train_ds, algorithm, metric);
 
@@ -377,17 +380,20 @@ TEST_CASE("Benchmark_sparse: TEST_QUICK_BM25_FILTER_MAXSCORE", "[benchmark][spar
         FilterDistribution::REVERSE_POSTING_ORDER
     };
 
-    for (auto filter_dist : filter_dists) {
-        FilterConfig filter_config;
-        filter_config.distribution = filter_dist;
-        filter_config.filter_ratio = filter_ratio;
+    for (float filter_ratio : filter_ratios) {
+        for (auto filter_dist : filter_dists) {
+            FilterConfig filter_config;
+            filter_config.distribution = filter_dist;
+            filter_config.filter_ratio = filter_ratio;
 
-        auto filter_data = GenFilterBitset(data_config.num_docs, filter_config);
-        auto filtered_gt = GenerateGroundTruth(train_ds, query_ds, metric, topk, filter_data, data_config.num_docs);
+            auto filter_data = GenFilterBitset(data_config.num_docs, filter_config);
+            auto filtered_gt = GenerateGroundTruth(train_ds, query_ds, metric, topk, filter_data, data_config.num_docs);
 
-        std::string test_name = algorithm + "_BM25_filter_" + FilterDistributionToString(filter_dist) + "_70pct";
-        auto stats = BenchmarkSearch(index, query_ds, filtered_gt, metric, topk, 0.0f, filter_data, data_config.num_docs);
-        PrintBenchmarkResults(test_name, stats);
+            std::string test_name = algorithm + "_BM25_filter_" + FilterDistributionToString(filter_dist) + "_" +
+                                    std::to_string(static_cast<int>(filter_ratio * 100)) + "pct";
+            auto stats = BenchmarkSearch(index, query_ds, filtered_gt, metric, topk, 0.0f, filter_data, data_config.num_docs);
+            PrintBenchmarkResults(test_name, stats);
+        }
     }
 }
 
@@ -406,7 +412,7 @@ TEST_CASE("Benchmark_sparse: TEST_FILTERED_SEARCH", "[benchmark][sparse][filter]
     data_config.num_docs = 100000;
     data_config.num_dims = 30000;
     data_config.doc_sparsity = 0.97f;
-    data_config.query_sparsity = 0.99f;
+    data_config.query_sparsity = 0.9998f;  // ~6 terms per query instead of 300
     data_config.num_queries = 100;
     data_config.distribution = DataDistribution::UNIFORM;
 
@@ -467,7 +473,7 @@ TEST_CASE("Benchmark_sparse: TEST_ITERATOR", "[benchmark][sparse][iterator]") {
     data_config.num_docs = 50000;
     data_config.num_dims = 30000;
     data_config.doc_sparsity = 0.97f;
-    data_config.query_sparsity = 0.99f;
+    data_config.query_sparsity = 0.9998f;  // ~6 terms per query instead of 300
     data_config.num_queries = 50;
     data_config.distribution = DataDistribution::UNIFORM;
 
@@ -527,7 +533,7 @@ TEST_CASE("Benchmark_sparse: TEST_CURSOR_SEEK_PATTERNS", "[benchmark][sparse][se
         data_config.num_docs = 100000;
         data_config.num_dims = 30000;
         data_config.doc_sparsity = 0.97f;
-        data_config.query_sparsity = 0.99f;
+        data_config.query_sparsity = 0.9998f;  // ~6 terms per query instead of 300
         data_config.num_queries = 100;
         data_config.distribution = dist;
 
@@ -583,7 +589,7 @@ TEST_CASE("Benchmark_sparse: TEST_DROP_RATIO_SEARCH", "[benchmark][sparse][drop_
     data_config.num_docs = 100000;
     data_config.num_dims = 30000;
     data_config.doc_sparsity = 0.97f;
-    data_config.query_sparsity = 0.99f;
+    data_config.query_sparsity = 0.9998f;  // ~6 terms per query instead of 300
     data_config.num_queries = 100;
     data_config.distribution = DataDistribution::UNIFORM;
 
@@ -661,7 +667,7 @@ TEST_CASE("Benchmark_sparse: TEST_SCALABILITY", "[benchmark][sparse][scalability
         data_config.num_docs = num_docs;
         data_config.num_dims = 30000;
         data_config.doc_sparsity = 0.97f;
-        data_config.query_sparsity = 0.99f;
+        data_config.query_sparsity = 0.9998f;  // ~6 terms per query instead of 300
         data_config.num_queries = 100;
         data_config.distribution = DataDistribution::UNIFORM;
 
