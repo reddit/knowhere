@@ -204,9 +204,10 @@ list(APPEND KNOWHERE_LINKER_LIBS fmt::fmt-header-only)
 list(APPEND KNOWHERE_LINKER_LIBS Folly::folly)
 list(APPEND KNOWHERE_LINKER_LIBS milvus-common)
 list(APPEND KNOWHERE_LINKER_LIBS simde::simde)
+list(APPEND KNOWHERE_LINKER_LIBS knowhere_utils)
 
 add_library(knowhere SHARED ${KNOWHERE_SRCS})
-add_dependencies(knowhere ${KNOWHERE_LINKER_LIBS})
+add_dependencies(knowhere ${KNOWHERE_LINKER_LIBS} knowhere_utils)
 if(WITH_CUVS)
   list(
     APPEND
