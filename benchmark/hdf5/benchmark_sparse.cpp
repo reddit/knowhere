@@ -11,6 +11,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <thread>
 #include <vector>
 
 #include "benchmark_sparse.h"
@@ -58,7 +59,23 @@ BuildIndex(const knowhere::DataSetPtr& train_ds, const std::string& algo, const 
     return index.value();
 }
 
-// Run search benchmark
+// Helper to create a single-query dataset from a sparse query dataset
+static knowhere::DataSetPtr
+CreateSingleQueryDataset(const knowhere::DataSetPtr& query_ds, int64_t query_idx) {
+    auto rows = query_ds->GetTensor();
+    auto sparse_rows = static_cast<const knowhere::sparse::SparseRow<float>*>(rows);
+
+    // Copy the single query row
+    auto single_row = std::make_unique<knowhere::sparse::SparseRow<float>[]>(1);
+    single_row[0] = sparse_rows[query_idx];  // Copy constructor
+
+    auto ds = knowhere::GenDataSet(1, query_ds->GetDim(), single_row.release());
+    ds->SetIsOwner(true);
+    ds->SetIsSparse(true);
+    return ds;
+}
+
+// Run search benchmark with individual query latency tracking
 static BenchmarkStats
 BenchmarkSearch(knowhere::Index<knowhere::IndexNode>& index, const knowhere::DataSetPtr& query_ds,
                 const knowhere::DataSetPtr& gt, const std::string& metric, int32_t topk, float drop_ratio_search,
@@ -85,20 +102,23 @@ BenchmarkSearch(knowhere::Index<knowhere::IndexNode>& index, const knowhere::Dat
 
     int64_t nq = query_ds->GetRows();
 
-    // Warmup run
+    // Warmup run (batch)
     auto warmup_result = index.Search(query_ds, search_conf, bitset);
 
-    // Benchmark runs
+    // Benchmark runs - search queries individually to get per-query latencies
     Timer total_timer;
     for (int32_t run = 0; run < num_runs; ++run) {
-        Timer run_timer;
-        auto result = index.Search(query_ds, search_conf, bitset);
-        stats.add_latency(run_timer.elapsed_us() / nq);  // Per-query latency
+        for (int64_t q = 0; q < nq; ++q) {
+            auto single_query = CreateSingleQueryDataset(query_ds, q);
+            Timer query_timer;
+            auto result = index.Search(single_query, search_conf, bitset);
+            stats.add_latency(query_timer.elapsed_us());
+        }
     }
     stats.total_time_s = total_timer.elapsed_seconds();
     stats.total_queries = nq * num_runs;
 
-    // Calculate recall against ground truth
+    // Calculate recall against ground truth (batch search is fine for recall)
     if (gt) {
         auto final_result = index.Search(query_ds, search_conf, bitset);
         if (final_result.has_value()) {
@@ -168,22 +188,25 @@ BenchmarkIterator(const knowhere::DataSetPtr& train_ds, const knowhere::DataSetP
         }
     }
 
-    // Benchmark runs - we measure the time to create iterators and iterate through results
+    // Benchmark runs - measure per-query latency by processing queries individually
     Timer total_timer;
     for (int32_t run = 0; run < num_runs; ++run) {
-        Timer run_timer;
-        auto result = index.value().AnnIterator(query_ds, conf, bitset);
-        if (result.has_value()) {
-            for (auto& iter : result.value()) {
-                if (iter) {
-                    // Iterate through all results to fully exercise GetAllDistances
-                    while (iter->HasNext()) {
-                        iter->Next();
+        for (int64_t q = 0; q < nq; ++q) {
+            auto single_query = CreateSingleQueryDataset(query_ds, q);
+            Timer query_timer;
+            auto result = index.value().AnnIterator(single_query, conf, bitset);
+            if (result.has_value()) {
+                for (auto& iter : result.value()) {
+                    if (iter) {
+                        // Iterate through all results to fully exercise GetAllDistances
+                        while (iter->HasNext()) {
+                            iter->Next();
+                        }
                     }
                 }
             }
+            stats.add_latency(query_timer.elapsed_us());
         }
-        stats.add_latency(run_timer.elapsed_us() / nq);
     }
     stats.total_time_s = total_timer.elapsed_seconds();
     stats.total_queries = nq * num_runs;
@@ -232,8 +255,8 @@ TEST_CASE("Benchmark_sparse: TEST_SEARCH_ALGORITHMS", "[benchmark][sparse]") {
     data_config.num_docs = 100000;
     data_config.num_dims = 30000;
     data_config.doc_sparsity = 0.97f;  // ~900 non-zeros per doc
-    data_config.query_sparsity = 0.99f;
-    data_config.num_queries = 100;
+    data_config.query_sparsity = 0.9998f;  // ~6 terms per query instead of 300
+    data_config.num_queries = 500;
     data_config.distribution = DataDistribution::UNIFORM;
 
     printf("[%.3f s] Generating data: %d docs, %d dims, sparsity=%.2f\n", g_T0.elapsed_seconds(), data_config.num_docs,
@@ -278,8 +301,8 @@ TEST_CASE("Benchmark_sparse: TEST_BM25_SEARCH", "[benchmark][sparse][bm25]") {
     data_config.num_docs = 100000;
     data_config.num_dims = 30000;
     data_config.doc_sparsity = 0.97f;
-    data_config.query_sparsity = 0.99f;
-    data_config.num_queries = 100;
+    data_config.query_sparsity = 0.9998f;  // ~6 terms per query instead of 300
+    data_config.num_queries = 500;
     data_config.distribution = DataDistribution::ZIPF;
     data_config.use_integer_values = true;
     data_config.max_tf = 256;
@@ -337,8 +360,67 @@ TEST_CASE("Benchmark_sparse: TEST_BM25_SEARCH", "[benchmark][sparse][bm25]") {
 }
 
 // ============================================================================
+// Test: Quick BM25 Filter test with DAAT MaxScore (0.7f filter ratio only)
+// ============================================================================
+TEST_CASE("Benchmark_sparse: TEST_QUICK_BM25_FILTER_MAXSCORE", "[benchmark][sparse][bm25][quick]") {
+    g_T0.reset();
+    knowhere::KnowhereConfig::SetSimdType(knowhere::KnowhereConfig::SimdType::AUTO);
+    // Use all available CPU cores for maximum QPS
+    knowhere::KnowhereConfig::SetSearchThreadPoolSize(std::thread::hardware_concurrency());
+
+    printf("\n[%.3f s] TEST_QUICK_BM25_FILTER_MAXSCORE\n", g_T0.elapsed_seconds());
+    printf("================================================================================\n");
+
+    DataGenConfig data_config;
+    data_config.num_docs = 50000;  // Smaller dataset for quick test
+    data_config.num_dims = 30000;
+    data_config.doc_sparsity = 0.97f;
+    data_config.query_sparsity = 0.9998f;  // ~6 terms per query instead of 300
+    data_config.num_queries = 100;  // Fewer queries for quick test
+    data_config.distribution = DataDistribution::ZIPF;
+    data_config.use_integer_values = true;
+    data_config.max_tf = 256;
+
+    printf("[%.3f s] Generating BM25 data: %d docs, %d dims, Zipf distribution (~6 terms/query)\n", g_T0.elapsed_seconds(),
+           data_config.num_docs, data_config.num_dims);
+
+    auto train_ds = GenSparseDataSetWithDistribution(data_config);
+    auto query_ds = GenSparseQuerySet(data_config);
+
+    std::string algorithm = "DAAT_MAXSCORE";
+    std::string metric = knowhere::metric::BM25;
+    int32_t topk = 10;
+    std::vector<float> filter_ratios = {0.7f, 0.9f};  // Test both 70% and 90% filter ratios
+
+    // Test with filters to exercise seek() path
+    printf("\n--- BM25 Search WITH 70%% and 90%% Filters (DAAT_MAXSCORE only) ---\n");
+
+    auto index = BuildIndex(train_ds, algorithm, metric);
+
+    std::vector<FilterDistribution> filter_dists = {
+        FilterDistribution::RANDOM,
+        FilterDistribution::REVERSE_POSTING_ORDER
+    };
+
+    for (float filter_ratio : filter_ratios) {
+        for (auto filter_dist : filter_dists) {
+            FilterConfig filter_config;
+            filter_config.distribution = filter_dist;
+            filter_config.filter_ratio = filter_ratio;
+
+            auto filter_data = GenFilterBitset(data_config.num_docs, filter_config);
+            auto filtered_gt = GenerateGroundTruth(train_ds, query_ds, metric, topk, filter_data, data_config.num_docs);
+
+            std::string test_name = algorithm + "_BM25_filter_" + FilterDistributionToString(filter_dist) + "_" +
+                                    std::to_string(static_cast<int>(filter_ratio * 100)) + "pct";
+            auto stats = BenchmarkSearch(index, query_ds, filtered_gt, metric, topk, 0.0f, filter_data, data_config.num_docs);
+            PrintBenchmarkResults(test_name, stats);
+        }
+    }
+}
+
+// ============================================================================
 // Test: Search with different filter ratios and distributions
-// This is critical for evaluating seek-fix and filter-aware-wand optimizations
 // ============================================================================
 TEST_CASE("Benchmark_sparse: TEST_FILTERED_SEARCH", "[benchmark][sparse][filter]") {
     g_T0.reset();
@@ -351,8 +433,8 @@ TEST_CASE("Benchmark_sparse: TEST_FILTERED_SEARCH", "[benchmark][sparse][filter]
     data_config.num_docs = 100000;
     data_config.num_dims = 30000;
     data_config.doc_sparsity = 0.97f;
-    data_config.query_sparsity = 0.99f;
-    data_config.num_queries = 100;
+    data_config.query_sparsity = 0.9998f;  // ~6 terms per query instead of 300
+    data_config.num_queries = 500;
     data_config.distribution = DataDistribution::UNIFORM;
 
     printf("[%.3f s] Generating data: %d docs, %d dims\n", g_T0.elapsed_seconds(), data_config.num_docs,
@@ -412,8 +494,8 @@ TEST_CASE("Benchmark_sparse: TEST_ITERATOR", "[benchmark][sparse][iterator]") {
     data_config.num_docs = 50000;
     data_config.num_dims = 30000;
     data_config.doc_sparsity = 0.97f;
-    data_config.query_sparsity = 0.99f;
-    data_config.num_queries = 50;
+    data_config.query_sparsity = 0.9998f;  // ~6 terms per query instead of 300
+    data_config.num_queries = 500;
     data_config.distribution = DataDistribution::UNIFORM;
 
     printf("[%.3f s] Generating data: %d docs, %d dims\n", g_T0.elapsed_seconds(), data_config.num_docs,
@@ -472,8 +554,8 @@ TEST_CASE("Benchmark_sparse: TEST_CURSOR_SEEK_PATTERNS", "[benchmark][sparse][se
         data_config.num_docs = 100000;
         data_config.num_dims = 30000;
         data_config.doc_sparsity = 0.97f;
-        data_config.query_sparsity = 0.99f;
-        data_config.num_queries = 100;
+        data_config.query_sparsity = 0.9998f;  // ~6 terms per query instead of 300
+        data_config.num_queries = 500;
         data_config.distribution = dist;
 
         printf("\n=== Data Distribution: %s ===\n", DataDistributionToString(dist).c_str());
@@ -528,8 +610,8 @@ TEST_CASE("Benchmark_sparse: TEST_DROP_RATIO_SEARCH", "[benchmark][sparse][drop_
     data_config.num_docs = 100000;
     data_config.num_dims = 30000;
     data_config.doc_sparsity = 0.97f;
-    data_config.query_sparsity = 0.99f;
-    data_config.num_queries = 100;
+    data_config.query_sparsity = 0.9998f;  // ~6 terms per query instead of 300
+    data_config.num_queries = 500;
     data_config.distribution = DataDistribution::UNIFORM;
 
     printf("[%.3f s] Generating data\n", g_T0.elapsed_seconds());
@@ -566,11 +648,15 @@ TEST_CASE("Benchmark_sparse: TEST_DROP_RATIO_SEARCH", "[benchmark][sparse][drop_
             // Warmup
             index.Search(query_ds, search_conf, nullptr);
 
+            // Benchmark with per-query latency tracking
             Timer total_timer;
             for (int32_t run = 0; run < num_runs; ++run) {
-                Timer run_timer;
-                auto result = index.Search(query_ds, search_conf, nullptr);
-                stats.add_latency(run_timer.elapsed_us() / nq);
+                for (int64_t q = 0; q < nq; ++q) {
+                    auto single_query = CreateSingleQueryDataset(query_ds, q);
+                    Timer query_timer;
+                    auto result = index.Search(single_query, search_conf, nullptr);
+                    stats.add_latency(query_timer.elapsed_us());
+                }
             }
             stats.total_time_s = total_timer.elapsed_seconds();
             stats.total_queries = nq * num_runs;
@@ -606,8 +692,8 @@ TEST_CASE("Benchmark_sparse: TEST_SCALABILITY", "[benchmark][sparse][scalability
         data_config.num_docs = num_docs;
         data_config.num_dims = 30000;
         data_config.doc_sparsity = 0.97f;
-        data_config.query_sparsity = 0.99f;
-        data_config.num_queries = 100;
+        data_config.query_sparsity = 0.9998f;  // ~6 terms per query instead of 300
+        data_config.num_queries = 500;
         data_config.distribution = DataDistribution::UNIFORM;
 
         printf("\n=== Dataset Size: %d docs ===\n", num_docs);
@@ -658,7 +744,7 @@ TEST_CASE("Benchmark_sparse: TEST_SPARSITY_LEVELS", "[benchmark][sparse][sparsit
         data_config.num_dims = 30000;
         data_config.doc_sparsity = sparsity;
         data_config.query_sparsity = sparsity + 0.005f;
-        data_config.num_queries = 100;
+        data_config.num_queries = 500;
         data_config.distribution = DataDistribution::UNIFORM;
 
         int32_t avg_nnz = static_cast<int32_t>(data_config.num_dims * (1.0f - sparsity));
