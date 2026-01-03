@@ -29,10 +29,10 @@ knowhere_file_glob(GLOB FAISS_RHNSW_SRCS thirdparty/faiss/faiss/impl/RHNSW.cpp)
 list(REMOVE_ITEM FAISS_SRCS ${FAISS_RHNSW_SRCS})
 
 if(__X86_64)
-  set(UTILS_SRC src/simd/distances_ref.cc src/simd/hook.cc src/simd/sparse_simd_ref.cc)
-  set(UTILS_SSE_SRC src/simd/distances_sse.cc)
-  set(UTILS_AVX_SRC src/simd/distances_avx.cc src/simd/sparse_simd_avx.cc)
-  set(UTILS_AVX512_SRC src/simd/distances_avx512.cc src/simd/sparse_simd_avx512.cc)
+  set(UTILS_SRC src/simd/distances_ref.cc src/simd/hook.cc src/simd/block_seek_ref.cc src/simd/block_seek_dispatch.cc src/simd/sparse_simd_ref.cc)
+  set(UTILS_SSE_SRC src/simd/distances_sse.cc src/simd/block_seek_sse.cc)
+  set(UTILS_AVX_SRC src/simd/distances_avx.cc src/simd/block_seek_avx2.cc src/simd/sparse_simd_avx.cc)
+  set(UTILS_AVX512_SRC src/simd/distances_avx512.cc src/simd/block_seek_avx512.cc src/simd/sparse_simd_avx512.cc)
   set(UTILS_AVX512ICX_SRC src/simd/distances_avx512icx.cc)
 
   add_library(utils_sse OBJECT ${UTILS_SSE_SRC})
@@ -57,7 +57,7 @@ endif()
 
 if(__AARCH64)
 
-  set(UTILS_SRC src/simd/distances_ref.cc src/simd/distances_neon.cc src/simd/sparse_simd_ref.cc src/simd/sparse_simd_neon.cc)
+  set(UTILS_SRC src/simd/distances_ref.cc src/simd/distances_neon.cc src/simd/block_seek_ref.cc src/simd/block_seek_dispatch.cc src/simd/sparse_simd_ref.cc src/simd/sparse_simd_neon.cc)
   set(UTILS_SVE_SRC src/simd/hook.cc src/simd/distances_sve.cc)
   set(ALL_UTILS_SRC ${UTILS_SRC} ${UTILS_SVE_SRC})
 
@@ -133,7 +133,7 @@ if(__AARCH64)
 endif()
 
 if(__RISCV64)
-  set(UTILS_SRC src/simd/hook.cc src/simd/distances_ref.cc src/simd/distances_rvv.cc src/simd/sparse_simd_ref.cc)
+  set(UTILS_SRC src/simd/hook.cc src/simd/distances_ref.cc src/simd/distances_rvv.cc src/simd/block_seek_ref.cc src/simd/block_seek_dispatch.cc src/simd/sparse_simd_ref.cc)
   add_library(knowhere_utils STATIC ${UTILS_SRC})
   target_link_libraries(knowhere_utils PUBLIC glog::glog)
   target_link_libraries(knowhere_utils PUBLIC xxHash::xxhash)
@@ -145,7 +145,7 @@ endif()
 
 # ToDo: Add distances_vsx.cc for powerpc64 SIMD acceleration
 if(__PPC64)
-  set(UTILS_SRC src/simd/hook.cc src/simd/distances_ref.cc src/simd/distances_powerpc.cc src/simd/sparse_simd_ref.cc)
+  set(UTILS_SRC src/simd/hook.cc src/simd/distances_ref.cc src/simd/distances_powerpc.cc src/simd/block_seek_ref.cc src/simd/block_seek_dispatch.cc src/simd/sparse_simd_ref.cc)
   add_library(knowhere_utils STATIC ${UTILS_SRC})
   target_link_libraries(knowhere_utils PUBLIC glog::glog)
   target_link_libraries(knowhere_utils PUBLIC xxHash::xxhash)

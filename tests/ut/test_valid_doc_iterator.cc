@@ -343,4 +343,3 @@ TEST_CASE("Test ValidDocIdIterator Interface", "[valid_doc_iterator]") {
     iter.advance_to_ge(75);
     REQUIRE(iter.current() == 75);
 }
-

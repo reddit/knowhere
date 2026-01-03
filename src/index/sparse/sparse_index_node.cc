@@ -137,9 +137,10 @@ class SparseInvertedIndexNode : public IndexNode {
         std::vector<folly::Future<folly::Unit>> futs;
         futs.reserve(nq);
         for (int64_t idx = 0; idx < nq; ++idx) {
-            futs.emplace_back(search_pool_->push([&, idx = idx, p_id = p_id.get(), p_dist = p_dist.get()]() {
+            futs.emplace_back(search_pool_->push([&, idx = idx, p_id_raw = p_id.get(), p_dist_raw = p_dist.get()]() {
                 knowhere::checkCancellation(op_context);
-                index_->Search(queries[idx], k, p_dist + idx * k, p_id + idx * k, bitset, computer, approx_params,
+                index_->Search(queries[idx], k, p_dist_raw + idx * k, p_id_raw + idx * k, bitset, computer,
+                               approx_params,
                                bm25_avgdl);
             }));
         }
@@ -401,19 +402,23 @@ class SparseInvertedIndexNode : public IndexNode {
             // so it should be at least 1.0 to avoid division by zero.
             avgdl = std::max(avgdl, 1.0f);
 
-            if (use_wand || cfg.inverted_index_algo.value() == "DAAT_WAND") {
+            // Note: use_wand template param just indicates SPARSE_WAND index type (vs SPARSE_INVERTED_INDEX).
+            // The actual algorithm (WAND vs MAXSCORE) is determined by inverted_index_algo config.
+            // Default to DAAT_WAND for SPARSE_WAND index type if algo not specified.
+            auto algo = cfg.inverted_index_algo.value_or(use_wand ? "DAAT_WAND" : "TAAT_NAIVE");
+            if (algo == "DAAT_WAND") {
                 auto index =
                     new sparse::InvertedIndex<value_type, uint16_t, sparse::InvertedIndexAlgo::DAAT_WAND, mmapped>(
                         sparse::SparseMetricType::METRIC_BM25);
                 index->SetBM25Params(k1, b, avgdl);
                 return index;
-            } else if (cfg.inverted_index_algo.value() == "DAAT_MAXSCORE") {
+            } else if (algo == "DAAT_MAXSCORE") {
                 auto index =
                     new sparse::InvertedIndex<value_type, uint16_t, sparse::InvertedIndexAlgo::DAAT_MAXSCORE, mmapped>(
                         sparse::SparseMetricType::METRIC_BM25);
                 index->SetBM25Params(k1, b, avgdl);
                 return index;
-            } else if (cfg.inverted_index_algo.value() == "TAAT_NAIVE") {
+            } else if (algo == "TAAT_NAIVE") {
                 auto index =
                     new sparse::InvertedIndex<value_type, uint16_t, sparse::InvertedIndexAlgo::TAAT_NAIVE, mmapped>(
                         sparse::SparseMetricType::METRIC_BM25);
@@ -424,17 +429,21 @@ class SparseInvertedIndexNode : public IndexNode {
                     Status::invalid_args, "Invalid search algorithm for SparseInvertedIndex");
             }
         } else {
-            if (use_wand || cfg.inverted_index_algo.value() == "DAAT_WAND") {
+            // Note: use_wand template param just indicates SPARSE_WAND index type (vs SPARSE_INVERTED_INDEX).
+            // The actual algorithm (WAND vs MAXSCORE) is determined by inverted_index_algo config.
+            // Default to DAAT_WAND for SPARSE_WAND index type if algo not specified.
+            auto algo_ip = cfg.inverted_index_algo.value_or(use_wand ? "DAAT_WAND" : "TAAT_NAIVE");
+            if (algo_ip == "DAAT_WAND") {
                 auto index =
                     new sparse::InvertedIndex<value_type, float, sparse::InvertedIndexAlgo::DAAT_WAND, mmapped>(
                         sparse::SparseMetricType::METRIC_IP);
                 return index;
-            } else if (cfg.inverted_index_algo.value() == "DAAT_MAXSCORE") {
+            } else if (algo_ip == "DAAT_MAXSCORE") {
                 auto index =
                     new sparse::InvertedIndex<value_type, float, sparse::InvertedIndexAlgo::DAAT_MAXSCORE, mmapped>(
                         sparse::SparseMetricType::METRIC_IP);
                 return index;
-            } else if (cfg.inverted_index_algo.value() == "TAAT_NAIVE") {
+            } else if (algo_ip == "TAAT_NAIVE") {
                 auto index =
                     new sparse::InvertedIndex<value_type, float, sparse::InvertedIndexAlgo::TAAT_NAIVE, mmapped>(
                         sparse::SparseMetricType::METRIC_IP);

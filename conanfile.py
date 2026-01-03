@@ -111,7 +111,11 @@ class KnowhereConan(ConanFile):
         self.requires("libcurl/8.2.1")
         self.requires("simde/0.8.2")
         self.requires("xxhash/0.8.3")
-        if self.settings.os == "Android":
+        # OpenBLAS provides BLAS/LAPACK and is needed for FAISS on Linux and Android
+        if self.settings.os == "Android" or self.settings.os == "Linux":
+            self.requires("openblas/0.3.27")
+        # OpenBLAS is needed by milvus-common on all platforms when building benchmarks
+        if self.options.with_benchmark and self.settings.os not in ["Android", "Linux"]:
             self.requires("openblas/0.3.27")
         if not self.options.with_light:
             self.requires("opentelemetry-cpp/1.8.1.1@milvus/dev")
@@ -186,9 +190,11 @@ class KnowhereConan(ConanFile):
         tc.variables["WITH_LIGHT"] = self.options.with_light
         tc.variables["WITH_COMPILE_PRUNE"] = self.options.with_compile_prune
 
-        # Configure ccache
-        tc.variables["CMAKE_CXX_COMPILER_LAUNCHER"] = "ccache"
-        tc.variables["CMAKE_C_COMPILER_LAUNCHER"] = "ccache"
+        # Configure ccache if available
+        import shutil
+        if shutil.which("ccache"):
+            tc.variables["CMAKE_CXX_COMPILER_LAUNCHER"] = "ccache"
+            tc.variables["CMAKE_C_COMPILER_LAUNCHER"] = "ccache"
 
         tc.generate()
 

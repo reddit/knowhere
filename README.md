@@ -44,7 +44,7 @@ $ conan remote add default-conan-local https://milvus01.jfrog.io/artifactory/api
 #DEBUG CPU
 $ conan install .. --build=missing -o with_ut=True -s compiler.libcxx=libstdc++11 -s build_type=Debug
 #RELEASE CPU
-$ conan install .. --build=missing -o with_ut=True -s compiler.libcxx=libstdc++11 -s build_type=Release
+$ conan install .. --build=missing -o with_ut=True -o with_benchmark=True -s compiler.libcxx=libstdc++11 -s build_type=Release
 #DEBUG GPU
 $ conan install .. --build=missing -o with_ut=True -o with_cuvs=True -s compiler.libcxx=libstdc++11 -s build_type=Debug
 #RELEASE GPU

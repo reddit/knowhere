@@ -39,6 +39,7 @@
 #include "knowhere/prometheus_client.h"
 #include "knowhere/sparse_utils.h"
 #include "knowhere/utils.h"
+#include "simd/block_seek.h"
 #include "simd/sparse_simd.h"
 
 namespace knowhere::sparse {
@@ -133,7 +134,6 @@ enum class InvertedIndexSectionType : uint32_t {
     // 2. Rebuild is O(total_nnz) which is fast
 };
 
-
 struct InvertedIndexSectionHeader {
     InvertedIndexSectionType type;
     uint64_t offset;
@@ -205,12 +205,17 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
         index_id_ = std::to_string(
             std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch())
                 .count());
-        index_size_gauge_ =
-            &sparse_inverted_index_size_family.Add({{"index_id", index_id_}, {"index_type", "inverted"}});
-        index_dataset_nnz_len_histogram_ =
-            &sparse_dataset_nnz_len_family.Add({{"index_id", index_id_}, {"index_type", "inverted"}}, defaultBuckets);
-        index_posting_list_len_histogram_ = &sparse_inverted_index_posting_list_len_family.Add(
-            {{"index_id", index_id_}, {"index_type", "inverted"}}, defaultBuckets);
+        index_size_gauge_ = &sparse_inverted_index_size_family.Add({{"index_id", index_id_},
+                                                                    { "index_type",
+                                                                      "inverted" }});
+        index_dataset_nnz_len_histogram_ = &sparse_dataset_nnz_len_family.Add({{"index_id", index_id_},
+                                                                               { "index_type",
+                                                                                 "inverted" }},
+                                                                              defaultBuckets);
+        index_posting_list_len_histogram_ = &sparse_inverted_index_posting_list_len_family.Add({{"index_id", index_id_},
+                                                                                                { "index_type",
+                                                                                                  "inverted" }},
+                                                                                               defaultBuckets);
 #endif
     }
 
@@ -865,11 +870,6 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
             return;  // Block max only needed for WAND/MaxScore algorithms
         }
 
-        LOG_KNOWHERE_DEBUG_ << "[BUILD_BLOCK_MAX_INFO] Starting: from_scratch=" << from_scratch
-                           << " nr_inner_dims=" << nr_inner_dims_
-                           << " block_max_info_.size()=" << block_max_info_.size()
-                           << " metric_type=" << (metric_type_ == SparseMetricType::METRIC_BM25 ? "BM25" : "IP");
-
         // Resize to match current number of dimensions (handles new dimensions added)
         if (block_max_info_.size() < nr_inner_dims_) {
             block_max_info_.resize(nr_inner_dims_);
@@ -928,15 +928,6 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
                 block_max_info_[dim_id].build_suffix_max();
             }
         }
-
-        // DEBUG: Log statistics
-        // size_t total_blocks = 0;
-        // for (const auto& info : block_max_info_) {
-        //    total_blocks += info.block_max_scores.size();
-        // }
-        // LOG_KNOWHERE_DEBUG_ << "[BUILD_BLOCK_MAX_INFO] Complete: total_blocks=" << total_blocks
-        //                   << " avg_blocks_per_dim=" << (nr_inner_dims_ > 0 ? (float)total_blocks / nr_inner_dims_ : 0)
-        //                   << " [OPTIMIZATION: O(1) suffix_max enabled]";
     }
 
     Status
@@ -1225,8 +1216,8 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
     struct Cursor {
      public:
         Cursor(const boost::span<const table_t>& plist_ids, const boost::span<const QType>& plist_vals, size_t num_vec,
-               float max_score, float q_value, DocIdFilter filter, const BlockMaxInfo* block_info = nullptr,
-               float dim_max_score_ratio = 1.0f)
+               float max_score, float q_value, DocIdFilter filter, bool use_filter_aware = false,
+               const BlockMaxInfo* block_info = nullptr, float dim_max_score_ratio = 1.0f)
             : plist_ids_(plist_ids),
               plist_vals_(plist_vals),
               plist_size_(plist_ids.size()),
@@ -1234,11 +1225,17 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
               max_score_(max_score),
               q_value_(q_value),
               filter_(filter),
+              use_filter_aware_(use_filter_aware && block_info != nullptr),
               block_info_(block_info),
               dim_max_score_ratio_(dim_max_score_ratio) {
             skip_filtered_linear();
             update_cur_vec_id();
-            update_current_block();
+            // Initialize cached max score
+            if (use_filter_aware_) {
+                update_current_block_and_cache();
+            } else {
+                cached_max_from_here_ = max_score_;
+            }
         }
         Cursor(const Cursor& rhs) = delete;
         Cursor(Cursor&& rhs) noexcept = default;
@@ -1246,10 +1243,12 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
         void
         next() {
             ++loc_;
-            // Use simple linear scan for next() - this is the hot path
             skip_filtered_linear();
             update_cur_vec_id();
-            update_current_block();
+            // Only do block tracking when filter-aware mode is active
+            if (use_filter_aware_) {
+                update_current_block_and_cache();
+            }
         }
 
         void
@@ -1257,16 +1256,70 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
             if (loc_ >= plist_size_) {
                 return;
             }
-
-            // Use galloping search to find position >= vec_id
-            // Galloping is O(log d) where d = distance,,
             loc_ = gallop_ge(loc_, vec_id);
-
-            // After seek, use simple linear filter test
-            // Linear scan is CPU-efficient: sequential access, predictable branches,
             skip_filtered_linear();
             update_cur_vec_id();
-            update_current_block();
+            // Only do block tracking when filter-aware mode is active
+            if (use_filter_aware_) {
+                update_current_block_and_cache();
+            }
+        }
+
+        // Block-Max WAND style seek: seeks to vec_id, optionally skipping low-scoring blocks AFTER that target.
+        // We want to find if this cursor contributes to vec_id.
+        // If the block containing vec_id has low score, we can skip to the next block boundary.
+        // But we must NOT skip past vec_id if it exists in the posting list.
+        // threshold: the minimum score this cursor needs to contribute for the candidate to matter
+        void
+        seek_above_threshold(table_t vec_id, float threshold) {
+            if (loc_ >= plist_size_) {
+                return;
+            }
+
+            // If not in filter-aware mode or no block info, fall back to regular seek
+            if (!use_filter_aware_ || block_info_ == nullptr) {
+                seek(vec_id);
+                return;
+            }
+
+            // First, use galloping to find position >= vec_id
+            loc_ = gallop_ge(loc_, vec_id);
+
+            // Check if we found vec_id exactly - if so, don't skip (we want its actual score)
+            // Block skipping is only safe when we're looking for the NEXT candidate after vec_id
+            if (loc_ < plist_size_ && plist_ids_[loc_] == vec_id) {
+                // Found the exact target - don't skip, we need to score this doc
+                skip_filtered_linear();
+                update_cur_vec_id();
+                update_current_block_and_cache();
+                return;
+            }
+
+            // vec_id not found in posting list - this cursor doesn't contribute to this doc
+            // DON'T skip blocks here - we might need to evaluate later candidates
+            // Block skipping would cause us to skip past valid future candidates
+            // The optimization should only happen during next() for essential cursors
+            skip_filtered_linear();
+            update_cur_vec_id();
+            update_current_block_and_cache();
+        }
+
+        // Advance to next doc, skipping low-scoring blocks.
+        // Useful for essential cursors that iterate sequentially but can skip blocks.
+        void
+        next_above_threshold(float threshold) {
+            ++loc_;
+
+            // Skip low-scoring blocks if in filter-aware mode
+            if (use_filter_aware_ && block_info_ != nullptr) {
+                skip_low_scoring_blocks(threshold);
+            }
+
+            skip_filtered_linear();
+            update_cur_vec_id();
+            if (use_filter_aware_) {
+                update_current_block_and_cache();
+            }
         }
 
         QType
@@ -1275,43 +1328,11 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
         }
 
         // Get the maximum possible score contribution from current position onwards.
-        // Uses precomputed block max scores for efficient O(1) lookup.
-        //
-        // When a filter is active, the bound may be slightly loose (the max-scoring doc
-        // in a block might be filtered out). This is acceptable because:
-        // 1. WAND/MaxScore still produces correct results (just slightly more candidate evaluation)
-        // 2. Position-aware bounds still provide significant pruning as we progress through posting lists
-        // 3. The alternative (recomputing per-block) has O(block_size) cost with cache-unfriendly access
-        //
-        // The q_value_ and dim_max_score_ratio_ multipliers are applied.
+        // When filter-aware: uses cached block max (updated on block change)
+        // When not filter-aware: returns global max_score_ (no overhead)
         float
         max_score_from_here() const {
-            if (loc_ >= plist_size_) {
-                return 0.0f;
-            }
-
-            // If no block info available, fall back to global max
-            if (block_info_ == nullptr) {
-                return max_score_;
-            }
-
-            // Use precomputed block max scores from current block onwards
-            // This is the fast path for both filtered and unfiltered cases
-            // Apply both q_value_ and dim_max_score_ratio_ for consistency with max_score_
-            float block_max = block_info_->max_score_from_block(current_block_);
-            return block_max * q_value_ * dim_max_score_ratio_;
-        }
-
-        // Get max score for just the current block (tighter bound for current pivot evaluation)
-        float
-        current_block_max_score() const {
-            if (loc_ >= plist_size_) {
-                return 0.0f;
-            }
-            if (block_info_ == nullptr) {
-                return max_score_;
-            }
-            return block_info_->block_score(current_block_) * q_value_ * dim_max_score_ratio_;
+            return cached_max_from_here_;
         }
 
         const boost::span<const table_t>& plist_ids_;
@@ -1323,11 +1344,18 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
         float q_value_ = 0.0f;
         DocIdFilter filter_;
         table_t cur_vec_id_ = 0;
-        size_t current_block_ = 0;
 
-        // Block-level max score info for position-aware bounds
+        // Filter-aware mode: when true, track blocks and use tighter bounds
+        // When false, bypass all block logic for zero overhead
+        const bool use_filter_aware_ = false;
+
+        // Block-level tracking (only used when use_filter_aware_ is true)
+        size_t current_block_ = 0;
         const BlockMaxInfo* block_info_ = nullptr;
-        float dim_max_score_ratio_ = 1.0f;  // Safety factor for max score bounds
+        float dim_max_score_ratio_ = 1.0f;
+
+        // Cached max score - either block-aware or global max depending on mode
+        float cached_max_from_here_ = 0.0f;
 
      private:
         inline void
@@ -1335,27 +1363,151 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
             cur_vec_id_ = (loc_ >= plist_size_) ? total_num_vec_ : plist_ids_[loc_];
         }
 
+        // Update block index and refresh cached max score only when block changes
         inline void
-        update_current_block() {
-            current_block_ = BlockMaxInfo::block_index(loc_);
+        update_current_block_and_cache() {
+            size_t new_block = BlockMaxInfo::block_index(loc_);
+            if (new_block != current_block_ || cached_max_from_here_ == 0.0f) {
+                current_block_ = new_block;
+                if (loc_ >= plist_size_) {
+                    cached_max_from_here_ = 0.0f;
+                } else {
+                    cached_max_from_here_ =
+                        block_info_->max_score_from_block(current_block_) * q_value_ * dim_max_score_ratio_;
+                }
+            }
         }
 
         // Fast linear scan - best for sequential next() operations
         // CPU-efficient: sequential memory access, predictable branches
+        // Optimized: for BitsetView filters, uses word-level bitset operations
+        // to skip fully-filtered 64-doc ranges in O(log d) instead of O(d)
         inline void
         skip_filtered_linear() {
             if (filter_.empty()) {
                 return;
             }
+
+            // Use word-level optimization only for BitsetView filters (not DocIdFilterByVector)
+            if constexpr (std::is_same_v<DocIdFilter, BitsetView>) {
+                // Fast path: BitsetView without id mapping
+                if (!filter_.has_out_ids()) {
+                    skip_filtered_word_optimized();
+                    return;
+                }
+            }
+
+            // Fall back to simple linear scan for other filter types or filters with id mapping
             while (loc_ < plist_size_ && filter_.test(plist_ids_[loc_])) {
                 ++loc_;
+            }
+        }
+
+        // Optimized filter skip using word-level bitset operations (BitsetView only).
+        // When we detect a doc in a fully-filtered 64-bit word (all bits set),
+        // we can skip all posting list entries in that range using galloping search.
+        // This is O(log d) where d is the distance to skip, instead of O(d) linear scan.
+        inline void
+        skip_filtered_word_optimized() {
+            static_assert(std::is_same_v<DocIdFilter, BitsetView>,
+                          "skip_filtered_word_optimized only works with BitsetView");
+
+            const uint8_t* bits = filter_.data();
+            const size_t num_bits = filter_.size();
+
+            // Safety check: if bitset is empty or too small, fall back to linear
+            if (num_bits == 0) {
+                while (loc_ < plist_size_ && filter_.test(plist_ids_[loc_])) {
+                    ++loc_;
+                }
+                return;
+            }
+
+            // Number of complete 64-bit words in the bitset
+            const size_t num_words = (num_bits + 63) / 64;
+            // Interpret bitset as 64-bit words for efficient full-word checks
+            const uint64_t* words = reinterpret_cast<const uint64_t*>(bits);
+
+            while (loc_ < plist_size_) {
+                const table_t doc_id = plist_ids_[loc_];
+
+                // Bounds check - doc_id beyond bitset means it's NOT filtered
+                if (doc_id >= static_cast<table_t>(num_bits)) {
+                    return;  // This doc passes (not in filter range)
+                }
+
+                const size_t word_idx = doc_id >> 6;     // doc_id / 64
+                const size_t bit_in_word = doc_id & 63;  // doc_id % 64
+
+                // Safety check: ensure word_idx is within bounds
+                if (word_idx >= num_words) {
+                    // Should not happen with bounds check above, but be safe
+                    ++loc_;
+                    continue;
+                }
+
+                const uint64_t word = words[word_idx];
+
+                // Check if this specific doc is filtered (bit set = filtered)
+                if ((word & (1ULL << bit_in_word)) == 0) {
+                    return;  // Found a passing (non-filtered) doc
+                }
+
+                // Doc is filtered. Check if entire 64-doc word is fully filtered.
+                // But only if this word represents complete 64-bit chunks within bounds
+                bool is_word_fully_filtered = (word == 0xFFFFFFFFFFFFFFFFULL);
+                if (is_word_fully_filtered && word_idx < num_words - 1) {
+                    // This is a complete 64-doc word and all docs are filtered.
+                    // Skip to the end of this word range using galloping search.
+                    // This avoids O(64) linear scans through fully-filtered regions.
+                    const table_t word_end = static_cast<table_t>((word_idx + 1) << 6);
+                    loc_ = gallop_ge(loc_ + 1, word_end);
+                } else {
+                    // Either partial word (last word may have padding) or only this doc is filtered
+                    ++loc_;
+                }
+            }
+        }
+
+        // Skip entire blocks whose max score is below threshold.
+        // This is the key bandwidth-saving optimization: we don't load doc IDs
+        // from blocks that can't contribute enough score to matter.
+        // The block's potential contribution is: block_max_score * q_value * dim_max_score_ratio
+        inline void
+        skip_low_scoring_blocks(float threshold) {
+            // Never skip blocks if threshold is non-positive (we need all candidates)
+            // The block-skipping optimization is only safe when you have a positive
+            // threshold, meaning you're looking for documents that must score higher than
+            // some positive value to be relevant.
+            if (threshold <= 0) {
+                return;
+            }
+
+            while (loc_ < plist_size_) {
+                size_t block_idx = loc_ / kBlockSize;
+                // Get this block's max possible contribution
+                float block_potential = block_info_->block_score(block_idx) * q_value_ * dim_max_score_ratio_;
+
+                if (block_potential >= threshold) {
+                    // This block might contribute enough, stop skipping
+                    break;
+                }
+
+                // Skip to the start of the next block - no data loaded from current block!
+                size_t next_block_start = (block_idx + 1) * kBlockSize;
+                if (next_block_start >= plist_size_) {
+                    // No more blocks
+                    loc_ = plist_size_;
+                    break;
+                }
+                loc_ = next_block_start;
             }
         }
 
         // Galloping (exponential) search: O(log d) where d is distance to target
         // Much faster than binary search when target is close
         // CPU-efficient: exponential phase is sequential (cache-friendly),
-        // binary search phase operates on a small range
+        // binary search phase uses SIMD when range is small
         inline size_t
         gallop_ge(size_t start, table_t target) const {
             if (start >= plist_size_ || plist_ids_[start] >= target) {
@@ -1375,9 +1527,21 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
             }
             hi = std::min(hi, plist_size_);
 
-            // Branchless binary search within the found range
+            // Use SIMD for binary search phase when range fits within a block
+            // SIMD processes 8-16 elements per cycle, making it efficient for
+            // ranges up to ~256 elements. Beyond that, the branchless binary
+            // search has better asymptotic complexity.
+            size_t range_size = hi - lo;
+            if (range_size <= kSimdBlockSize * 2) {
+                // SIMD seek within the narrowed range
+                // Returns offset within range, add lo to get absolute position
+                size_t offset = simd_seek_in_block(plist_ids_.data() + lo, target, range_size);
+                return lo + offset;
+            }
+
+            // Fallback: Branchless binary search for large ranges
             // Uses bit masking instead of conditional branches to avoid misprediction
-            size_t n = hi - lo;
+            size_t n = range_size;
             while (n > 0) {
                 size_t half = n >> 1;
                 size_t mid = lo + half;
@@ -1419,8 +1583,8 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
 
     template <typename DocIdFilter>
     std::vector<Cursor<DocIdFilter>>
-    make_cursors(const std::vector<std::pair<size_t, DType>>& q_vec, DocIdFilter& filter,
-                 float dim_max_score_ratio) const {
+    make_cursors(const std::vector<std::pair<size_t, DType>>& q_vec, DocIdFilter& filter, float dim_max_score_ratio,
+                 bool use_filter_aware) const {
         std::vector<Cursor<DocIdFilter>> cursors;
         cursors.reserve(q_vec.size());
 
@@ -1430,13 +1594,13 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
 
             // Get block info if available for position-aware bounds
             const BlockMaxInfo* block_info_ptr = nullptr;
-            if (q_dim.first < block_max_info_.size()) {
+            if (use_filter_aware && q_dim.first < block_max_info_.size()) {
                 block_info_ptr = &block_max_info_[q_dim.first];
             }
 
             cursors.emplace_back(plist_ids, plist_vals, n_rows_internal_,
                                  max_score_in_dim_spans_[q_dim.first] * q_dim.second * dim_max_score_ratio,
-                                 q_dim.second, filter, block_info_ptr, dim_max_score_ratio);
+                                 q_dim.second, filter, use_filter_aware, block_info_ptr, dim_max_score_ratio);
         }
         return cursors;
     }
@@ -1461,7 +1625,11 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
     void
     search_daat_wand(const std::vector<std::pair<size_t, DType>>& q_vec, MaxMinHeap<float>& heap, DocIdFilter& filter,
                      const DocValueComputer<float>& computer, float dim_max_score_ratio) const {
-        std::vector<Cursor<DocIdFilter>> cursors = make_cursors(q_vec, filter, dim_max_score_ratio);
+        // Decide filter-aware mode BEFORE creating cursors
+        const bool use_filter_aware = !filter.empty() && !block_max_info_.empty();
+
+        std::vector<Cursor<DocIdFilter>> cursors =
+            make_cursors(q_vec, filter, dim_max_score_ratio, use_filter_aware);
         std::vector<Cursor<DocIdFilter>*> cursor_ptrs(cursors.size());
         for (size_t i = 0; i < cursors.size(); ++i) {
             cursor_ptrs[i] = &cursors[i];
@@ -1473,21 +1641,7 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
         };
         sort_cursors();
 
-        // Determine if we should use filter-aware bounds
-        // Filter-aware mode is beneficial when filter ratio is significant
-        const bool use_filter_aware = !filter.empty() && !block_max_info_.empty();
-
-        // DEBUG: Log filter-aware status
-        size_t filter_aware_count = 0;
-        size_t non_filter_aware_count = 0;
-        size_t total_iterations = 0;
-        LOG_KNOWHERE_DEBUG_ << "[WAND] use_filter_aware=" << use_filter_aware
-                           << " filter.empty()=" << filter.empty()
-                           << " block_max_info_.empty()=" << block_max_info_.empty()
-                           << " block_max_info_.size()=" << block_max_info_.size();
-
         while (true) {
-            ++total_iterations;
             float threshold = heap.full() ? heap.top().val : 0;
             float upper_bound = 0;
             size_t pivot;
@@ -1497,35 +1651,14 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
                 if (cursor_ptrs[pivot]->cur_vec_id_ >= n_rows_internal_) {
                     break;
                 }
-                // Use filter-aware max score when available
-                // This gives tighter bounds when many docs are filtered
-                if (use_filter_aware) {
-                    float filter_aware_score = cursor_ptrs[pivot]->max_score_from_here();
-                    upper_bound += filter_aware_score;
-                    ++filter_aware_count;
-                    // DEBUG: Log first 4 AND every 5000th iteration to see progression
-                    if (total_iterations < 5 || (total_iterations % 5000 == 0 && total_iterations < 20000)) {
-                        LOG_KNOWHERE_DEBUG_ << "  [WAND iter " << total_iterations
-                                           << "] pivot=" << pivot
-                                           << " filter_aware_score=" << filter_aware_score
-                                           << " global_max=" << cursor_ptrs[pivot]->max_score_
-                                           << " block=" << cursor_ptrs[pivot]->current_block_
-                                           << " loc=" << cursor_ptrs[pivot]->loc_;
-                    }
-                } else {
-                    upper_bound += cursor_ptrs[pivot]->max_score_;
-                    ++non_filter_aware_count;
-                }
+                // max_score_from_here() returns cached value (block-aware or global depending on mode)
+                upper_bound += cursor_ptrs[pivot]->max_score_from_here();
                 if (upper_bound > threshold) {
                     found_pivot = true;
                     break;
                 }
             }
             if (!found_pivot) {
-                // DEBUG: Log summary before breaking
-                LOG_KNOWHERE_DEBUG_ << "[WAND] Search complete: iterations=" << total_iterations
-                                   << " filter_aware_path=" << filter_aware_count
-                                   << " non_filter_aware_path=" << non_filter_aware_count;
                 break;
             }
 
@@ -1566,10 +1699,11 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
             return a.second * max_score_in_dim_spans_[a.first] > b.second * max_score_in_dim_spans_[b.first];
         });
 
-        std::vector<Cursor<DocIdFilter>> cursors = make_cursors(q_vec, filter, dim_max_score_ratio);
-
-        // Determine if we should use filter-aware bounds
+        // Decide filter-aware mode BEFORE creating cursors
         const bool use_filter_aware = !filter.empty() && !block_max_info_.empty();
+
+        std::vector<Cursor<DocIdFilter>> cursors =
+            make_cursors(q_vec, filter, dim_max_score_ratio, use_filter_aware);
 
         // ============================================================
         // Filter-aware re-sorting with selectivity tie-breaker
@@ -1632,16 +1766,11 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
                            << " block_max_info_.empty()=" << block_max_info_.empty()
                            << " block_max_info_.size()=" << block_max_info_.size();
 
-        // Compute initial upper bounds
-        // With filter-aware mode, we use block-level max scores from current position
+        // Compute initial upper bounds - max_score_from_here() returns appropriate value based on mode
         std::vector<float> upper_bounds(cursors.size());
         float bound_sum = 0.0;
         for (size_t i = cursors.size() - 1; i + 1 > 0; --i) {
-            if (use_filter_aware) {
-                bound_sum += cursors[i].max_score_from_here();
-            } else {
-                bound_sum += cursors[i].max_score_;
-            }
+            bound_sum += cursors[i].max_score_from_here();
             upper_bounds[i] = bound_sum;
         }
 
@@ -1658,8 +1787,6 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
         while (first_ne_idx != 0 && upper_bounds[first_ne_idx - 1] <= threshold) {
             --first_ne_idx;
             if (first_ne_idx == 0) {
-                LOG_KNOWHERE_DEBUG_ << "[MAXSCORE] Search complete (early exit - all non-essential): "
-                                   << "filter_aware_recomputes=" << filter_aware_recompute_count;
                 return;
             }
         }
@@ -1670,28 +1797,23 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
         while (curr_cand_vec_id < n_rows_internal_) {
             auto found_cand = false;
             while (found_cand == false) {
-                // start find from next_vec_id
                 if (next_cand_vec_id >= n_rows_internal_) {
-                    LOG_KNOWHERE_DEBUG_ << "[MAXSCORE] Search complete (exhausted docs): "
-                                       << "filter_aware_recomputes=" << filter_aware_recompute_count;
                     return;
                 }
-                // get current candidate vector
                 curr_cand_vec_id = next_cand_vec_id;
                 curr_cand_score = 0.0f;
-                // update next_cand_vec_id
                 next_cand_vec_id = n_rows_internal_;
                 float cur_vec_sum =
                     metric_type_ == SparseMetricType::METRIC_BM25 ? bm25_params_->row_sums_spans_[curr_cand_vec_id] : 0;
 
-                // Process essential cursors and track if any moved to a new block
+                // Process essential cursors and track if any moved to a new block (only in filter-aware mode)
                 bool any_cursor_moved = false;
                 for (size_t i = 0; i < first_ne_idx; ++i) {
                     if (cursors[i].cur_vec_id_ == curr_cand_vec_id) {
                         curr_cand_score += cursors[i].q_value_ * computer(cursors[i].cur_vec_val(), cur_vec_sum);
                         size_t old_block = cursors[i].current_block_;
                         cursors[i].next();
-                        // Check if cursor moved to a different block (tighter bounds possible)
+                        // Only track block changes in filter-aware mode
                         if (use_filter_aware && cursors[i].current_block_ != old_block) {
                             any_cursor_moved = true;
                         }
@@ -1701,20 +1823,12 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
                     }
                 }
 
-                // Recompute upper bounds only when cursors crossed block boundaries
-                // This gives tighter bounds while avoiding expensive recomputation every iteration
+                // Recompute upper bounds only when cursors crossed block boundaries (filter-aware mode only)
                 if (any_cursor_moved) {
-                    ++filter_aware_recompute_count;
                     bound_sum = 0.0;
                     for (size_t i = cursors.size() - 1; i + 1 > 0; --i) {
                         bound_sum += cursors[i].max_score_from_here();
                         upper_bounds[i] = bound_sum;
-                    }
-                    // DEBUG: Log first few recomputes
-                    if (filter_aware_recompute_count <= 3) {
-                        LOG_KNOWHERE_DEBUG_ << "  [MAXSCORE recompute #" << filter_aware_recompute_count
-                                           << "] cand_id=" << curr_cand_vec_id
-                                           << " new_bound_sum=" << bound_sum;
                     }
                 }
 
@@ -1724,7 +1838,10 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
                         found_cand = false;
                         break;
                     }
-                    cursors[i].seek(curr_cand_vec_id);
+                    // Block-Max optimization: skip blocks whose max score can't help reach threshold
+                    // The cursor needs to contribute at least (threshold - curr_cand_score) to matter
+                    float min_contribution_needed = threshold - curr_cand_score;
+                    cursors[i].seek_above_threshold(curr_cand_vec_id, min_contribution_needed);
                     if (cursors[i].cur_vec_id_ == curr_cand_vec_id) {
                         curr_cand_score += cursors[i].q_value_ * computer(cursors[i].cur_vec_val(), cur_vec_sum);
                     }
@@ -1737,15 +1854,11 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
                 while (first_ne_idx != 0 && upper_bounds[first_ne_idx - 1] <= threshold) {
                     --first_ne_idx;
                     if (first_ne_idx == 0) {
-                        LOG_KNOWHERE_DEBUG_ << "[MAXSCORE] Search complete (early exit): "
-                                           << "filter_aware_recomputes=" << filter_aware_recompute_count;
                         return;
                     }
                 }
             }
         }
-        LOG_KNOWHERE_DEBUG_ << "[MAXSCORE] Search complete: "
-                           << "filter_aware_recomputes=" << filter_aware_recompute_count;
     }
 
     void
