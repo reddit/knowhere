@@ -24,7 +24,6 @@ class SparseInvertedIndexConfig : public BaseConfig {
     CFG_INT refine_factor;
     CFG_FLOAT dim_max_score_ratio;
     CFG_STRING inverted_index_algo;
-    CFG_BOOL use_idf_pruning;  // Lucene-style IDF-aware WAND pruning
     KNOHWERE_DECLARE_CONFIG(SparseInvertedIndexConfig) {
         // NOTE: drop_ratio_build has been deprecated, it won't change anything
         KNOWHERE_CONFIG_DECLARE_FIELD(drop_ratio_build)
@@ -81,19 +80,6 @@ class SparseInvertedIndexConfig : public BaseConfig {
             .set_range(0.5, 1.3)
             .set_default(1.05)
             .description("ratio to upscale/downscale the max score of each dimension")
-            .for_search();
-        /**
-         * use_idf_pruning enables Lucene-style IDF-aware WAND pruning.
-         * When enabled:
-         * - Terms are weighted by IDF: rare terms (low doc frequency) get higher weight
-         * - Upper bounds in WAND incorporate IDF for tighter pruning
-         * - Scoring includes IDF: score = Σ (q_weight × IDF) × TF_score
-         * This prioritizes discriminative terms and improves pruning efficiency.
-         * Recommended: true for BM25 (text search), false for raw IP scoring.
-         */
-        KNOWHERE_CONFIG_DECLARE_FIELD(use_idf_pruning)
-            .set_default(true)
-            .description("enable Lucene-style IDF-aware WAND pruning")
             .for_search();
         KNOWHERE_CONFIG_DECLARE_FIELD(inverted_index_algo)
             .description("inverted index algorithm")

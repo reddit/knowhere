@@ -140,7 +140,6 @@ struct InvertedIndexApproxSearchParams {
     int refine_factor;
     float drop_ratio_search;
     float dim_max_score_ratio;
-    bool use_idf_pruning = true;  // IDF-aware WAND pruning (Lucene-style)
 };
 
 template <typename T>
@@ -442,9 +441,6 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
         // Build block-level max scores for filter-aware WAND
         build_block_max_info();
 
-        // Build IDF for Lucene-style IDF-aware pruning
-        build_idf_info();
-
         return Status::success;
     }
 
@@ -720,9 +716,6 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
         // Build block-level max scores for filter-aware WAND
         build_block_max_info();
 
-        // Build IDF for Lucene-style IDF-aware pruning
-        build_idf_info();
-
         return Status::success;
     }
 
@@ -932,45 +925,6 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
         }
     }
 
-    // Build IDF (Inverse Document Frequency) for each dimension.
-    // IDF enables Lucene-style pruning: rare terms (high IDF) get priority in WAND.
-    // Uses BM25's IDF formula: log(1 + (N - df + 0.5) / (df + 0.5))
-    // This is called after deserialization or Add() to ensure IDF reflects current state.
-    void
-    build_idf_info() {
-        if constexpr (algo != InvertedIndexAlgo::DAAT_WAND && algo != InvertedIndexAlgo::DAAT_MAXSCORE) {
-            return;  // IDF pruning only useful for WAND/MaxScore algorithms
-        }
-
-        if (nr_inner_dims_ == 0 || n_rows_internal_ == 0) {
-            return;
-        }
-
-        // Resize IDF storage if needed
-        if constexpr (!mmapped) {
-            if (idf_per_dim_.size() < nr_inner_dims_) {
-                idf_per_dim_.resize(nr_inner_dims_);
-            }
-        }
-
-        float N = static_cast<float>(n_rows_internal_);
-
-        for (size_t dim_id = 0; dim_id < nr_inner_dims_; ++dim_id) {
-            // df = document frequency = number of documents containing this term
-            float df = static_cast<float>(inverted_index_ids_spans_[dim_id].size());
-
-            // BM25 IDF formula (same as Lucene):
-            // IDF = log(1 + (N - df + 0.5) / (df + 0.5))
-            // This gives:
-            //   - High IDF (~log N) for rare terms (df << N)
-            //   - Low IDF (~0) for common terms (df ≈ N)
-            //   - Always non-negative
-            idf_per_dim_[dim_id] = std::log(1.0f + (N - df + 0.5f) / (df + 0.5f));
-        }
-
-        idf_per_dim_spans_ = boost::span<const float>(idf_per_dim_.data(), idf_per_dim_.size());
-    }
-
     Status
     Add(const SparseRow<DType>* data, size_t rows, int64_t dim) override {
         if constexpr (mmapped) {
@@ -1023,10 +977,6 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
             // This only updates blocks affected by newly added data
             build_block_max_info(/*from_scratch=*/false);
 
-            // Rebuild IDF since document count changed
-            // IDF = log(1 + (N - df + 0.5) / (df + 0.5)) depends on N
-            build_idf_info();
-
             return Status::success;
         }
     }
@@ -1048,13 +998,10 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
 
         MaxMinHeap<float> heap(k * approx_params.refine_factor);
         // DAAT_WAND and DAAT_MAXSCORE are based on the implementation in PISA.
-        // IDF-aware pruning (Lucene-style): prioritize rare terms in upper bound computation
         if constexpr (algo == InvertedIndexAlgo::DAAT_WAND) {
-            search_daat_wand(q_vec, heap, bitset, computer, approx_params.dim_max_score_ratio,
-                             approx_params.use_idf_pruning);
+            search_daat_wand(q_vec, heap, bitset, computer, approx_params.dim_max_score_ratio);
         } else if constexpr (algo == InvertedIndexAlgo::DAAT_MAXSCORE) {
-            search_daat_maxscore(q_vec, heap, bitset, computer, approx_params.dim_max_score_ratio,
-                                 approx_params.use_idf_pruning);
+            search_daat_maxscore(q_vec, heap, bitset, computer, approx_params.dim_max_score_ratio);
         } else {
             search_taat_naive(q_vec, heap, bitset, computer);
         }
@@ -1561,7 +1508,7 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
     template <typename DocIdFilter>
     std::vector<Cursor<DocIdFilter>>
     make_cursors(const std::vector<std::pair<size_t, DType>>& q_vec, DocIdFilter& filter, float dim_max_score_ratio,
-                 bool use_filter_aware, bool use_idf_pruning = false) const {
+                 bool use_filter_aware) const {
         std::vector<Cursor<DocIdFilter>> cursors;
         cursors.reserve(q_vec.size());
 
@@ -1575,20 +1522,9 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
                 block_info_ptr = &block_max_info_[q_dim.first];
             }
 
-            // Compute effective query value with optional IDF weighting (Lucene-style)
-            // IDF-aware: effective_q_value = query_weight × IDF
-            // This makes the full BM25 formula: score = Σ (q_weight × IDF) × TF_score
-            // IDF prioritizes rare terms in both upper bounds AND actual scoring
-            float effective_q_value = q_dim.second;
-            if (use_idf_pruning && !idf_per_dim_spans_.empty()) {
-                effective_q_value *= idf_per_dim_spans_[q_dim.first];
-            }
-
-            // max_score = max_doc_score × effective_q_value × ratio
-            float max_score = max_score_in_dim_spans_[q_dim.first] * effective_q_value * dim_max_score_ratio;
-
-            cursors.emplace_back(plist_ids, plist_vals, n_rows_internal_, max_score, effective_q_value, filter,
-                                 use_filter_aware, block_info_ptr, dim_max_score_ratio);
+            cursors.emplace_back(plist_ids, plist_vals, n_rows_internal_,
+                                 max_score_in_dim_spans_[q_dim.first] * q_dim.second * dim_max_score_ratio,
+                                 q_dim.second, filter, use_filter_aware, block_info_ptr, dim_max_score_ratio);
         }
         return cursors;
     }
@@ -1611,13 +1547,12 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
     template <typename DocIdFilter>
     void
     search_daat_wand(const std::vector<std::pair<size_t, DType>>& q_vec, MaxMinHeap<float>& heap, DocIdFilter& filter,
-                     const DocValueComputer<float>& computer, float dim_max_score_ratio,
-                     bool use_idf_pruning = false) const {
+                     const DocValueComputer<float>& computer, float dim_max_score_ratio) const {
         // Decide filter-aware mode BEFORE creating cursors
         const bool use_filter_aware = !filter.empty() && !block_max_info_.empty();
 
         std::vector<Cursor<DocIdFilter>> cursors =
-            make_cursors(q_vec, filter, dim_max_score_ratio, use_filter_aware, use_idf_pruning);
+            make_cursors(q_vec, filter, dim_max_score_ratio, use_filter_aware);
         std::vector<Cursor<DocIdFilter>*> cursor_ptrs(cursors.size());
         for (size_t i = 0; i < cursors.size(); ++i) {
             cursor_ptrs[i] = &cursors[i];
@@ -1682,25 +1617,16 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
     template <typename DocIdFilter>
     void
     search_daat_maxscore(std::vector<std::pair<size_t, DType>>& q_vec, MaxMinHeap<float>& heap, DocIdFilter& filter,
-                         const DocValueComputer<float>& computer, float dim_max_score_ratio,
-                         bool use_idf_pruning = false) const {
-        // Sort by effective upper bound contribution (with optional IDF weighting)
-        // IDF-aware: sort by q_value × max_score × IDF (rare terms get higher priority)
-        std::sort(q_vec.begin(), q_vec.end(), [this, use_idf_pruning](auto& a, auto& b) {
-            float score_a = a.second * max_score_in_dim_spans_[a.first];
-            float score_b = b.second * max_score_in_dim_spans_[b.first];
-            if (use_idf_pruning && !idf_per_dim_spans_.empty()) {
-                score_a *= idf_per_dim_spans_[a.first];
-                score_b *= idf_per_dim_spans_[b.first];
-            }
-            return score_a > score_b;
+                         const DocValueComputer<float>& computer, float dim_max_score_ratio) const {
+        std::sort(q_vec.begin(), q_vec.end(), [this](auto& a, auto& b) {
+            return a.second * max_score_in_dim_spans_[a.first] > b.second * max_score_in_dim_spans_[b.first];
         });
 
         // Decide filter-aware mode BEFORE creating cursors
         const bool use_filter_aware = !filter.empty() && !block_max_info_.empty();
 
         std::vector<Cursor<DocIdFilter>> cursors =
-            make_cursors(q_vec, filter, dim_max_score_ratio, use_filter_aware, use_idf_pruning);
+            make_cursors(q_vec, filter, dim_max_score_ratio, use_filter_aware);
 
         float threshold = heap.full() ? heap.top().val : 0;
 
@@ -1821,11 +1747,10 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
         float dim_max_score_ratio = std::max(approx_params.dim_max_score_ratio, 1.0f);
 
         DocIdFilterByVector filter(std::move(docids));
-        // Use same IDF setting for refinement to ensure consistent scoring
         if constexpr (algo == InvertedIndexAlgo::DAAT_WAND) {
-            search_daat_wand(q_vec, heap, filter, computer, dim_max_score_ratio, approx_params.use_idf_pruning);
+            search_daat_wand(q_vec, heap, filter, computer, dim_max_score_ratio);
         } else if constexpr (algo == InvertedIndexAlgo::DAAT_MAXSCORE) {
-            search_daat_maxscore(q_vec, heap, filter, computer, dim_max_score_ratio, approx_params.use_idf_pruning);
+            search_daat_maxscore(q_vec, heap, filter, computer, dim_max_score_ratio);
         } else {
             search_taat_naive(q_vec, heap, filter, computer);
         }
@@ -1928,12 +1853,6 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
     // Block-level max scores for filter-aware WAND
     // For each dimension (term), stores max scores for each block of kBlockSize docs
     std::vector<BlockMaxInfo> block_max_info_;
-
-    // IDF (Inverse Document Frequency) per dimension for Lucene-style IDF-aware pruning
-    // IDF = log(1 + (N - df + 0.5) / (df + 0.5)) where N = total docs, df = docs with term
-    // Higher IDF = rarer term = more discriminative = higher priority in WAND
-    Vector<float> idf_per_dim_;
-    boost::span<const float> idf_per_dim_spans_;
 
     SparseMetricType metric_type_;
 
