@@ -364,31 +364,93 @@ GenFilterBitset(int32_t num_docs, const FilterConfig& config) {
 }
 
 // Calculate recall between ground truth and results
+// If debug_mismatches is true, print detailed info about mismatched results
 inline float
-CalcRecall(const knowhere::DataSet& ground_truth, const knowhere::DataSet& result) {
+CalcRecall(const knowhere::DataSet& ground_truth, const knowhere::DataSet& result, bool debug_mismatches = false) {
     auto nq = result.GetRows();
     auto k = result.GetDim();
     auto gt_k = ground_truth.GetDim();
     auto gt_ids = ground_truth.GetIds();
     auto res_ids = result.GetIds();
+    auto gt_distances = ground_truth.GetDistance();
+    auto res_distances = result.GetDistance();
 
     if (gt_ids == nullptr || res_ids == nullptr) {
         return 0.0f;
     }
 
     int32_t match_count = 0;
+    int32_t mismatch_queries = 0;
     for (int64_t i = 0; i < nq; ++i) {
         std::set<int64_t> gt_set;
+        std::set<int64_t> res_set;
         for (int64_t j = 0; j < gt_k && j < k; ++j) {
             if (gt_ids[i * gt_k + j] >= 0) {
                 gt_set.insert(gt_ids[i * gt_k + j]);
             }
         }
+        int32_t query_matches = 0;
         for (int64_t j = 0; j < k; ++j) {
-            if (res_ids[i * k + j] >= 0 && gt_set.count(res_ids[i * k + j]) > 0) {
-                match_count++;
+            if (res_ids[i * k + j] >= 0) {
+                res_set.insert(res_ids[i * k + j]);
+                if (gt_set.count(res_ids[i * k + j]) > 0) {
+                    query_matches++;
+                }
             }
         }
+        match_count += query_matches;
+
+        // Debug: print mismatches for this query
+        if (debug_mismatches && query_matches < static_cast<int32_t>(std::min(k, gt_k))) {
+            mismatch_queries++;
+            printf("\n[RECALL_MISMATCH] Query %ld: matched %d/%ld\n", i, query_matches, std::min(k, gt_k));
+
+            // Find IDs in GT but not in result
+            printf("  GT IDs not in result: ");
+            for (auto gt_id : gt_set) {
+                if (res_set.find(gt_id) == res_set.end()) {
+                    printf("%ld ", gt_id);
+                }
+            }
+            printf("\n");
+
+            // Find IDs in result but not in GT
+            printf("  Result IDs not in GT: ");
+            for (auto res_id : res_set) {
+                if (gt_set.find(res_id) == gt_set.end()) {
+                    printf("%ld ", res_id);
+                }
+            }
+            printf("\n");
+
+            // Print GT IDs and distances
+            printf("  GT top-%ld: ", std::min(k, gt_k));
+            for (int64_t j = 0; j < std::min(k, gt_k); ++j) {
+                if (gt_distances) {
+                    printf("(%ld:%.6f) ", gt_ids[i * gt_k + j], gt_distances[i * gt_k + j]);
+                } else {
+                    printf("%ld ", gt_ids[i * gt_k + j]);
+                }
+            }
+            printf("\n");
+
+            // Print result IDs and distances
+            printf("  Result top-%ld: ", k);
+            for (int64_t j = 0; j < k; ++j) {
+                if (res_distances) {
+                    printf("(%ld:%.6f) ", res_ids[i * k + j], res_distances[i * k + j]);
+                } else {
+                    printf("%ld ", res_ids[i * k + j]);
+                }
+            }
+            printf("\n");
+            fflush(stdout);
+        }
+    }
+
+    if (debug_mismatches && mismatch_queries > 0) {
+        printf("\n[RECALL_SUMMARY] Total queries with mismatches: %d/%ld\n", mismatch_queries, nq);
+        fflush(stdout);
     }
 
     return static_cast<float>(match_count) / (nq * std::min(k, gt_k));

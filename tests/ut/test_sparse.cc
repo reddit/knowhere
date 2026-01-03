@@ -683,6 +683,7 @@ TEST_CASE("Test BlockMaxInfo Structure", "[block_max]") {
     SECTION("Max Score From Block") {
         BlockMaxInfo info;
         info.block_max_scores = {0.5f, 0.8f, 0.3f, 0.9f, 0.2f};
+        info.build_suffix_max();  // Required for max_score_from_block to work
 
         // From block 0: should return max of all blocks
         REQUIRE(info.max_score_from_block(0) == 0.9f);
