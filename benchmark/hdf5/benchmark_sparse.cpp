@@ -1052,7 +1052,7 @@ TEST_CASE("Benchmark_sparse: TEST_SCALABILITY", "[benchmark][sparse][scalability
 // ============================================================================
 // Test: Different sparsity levels
 // ============================================================================
-TEST_CASE("Benchmark_sparse: TEST_SPARSITY_LEVELS", "[benchmark][sparse][sparsity]") {
+TEST_CASE("Benchmark_sparse: TEST_SPARSITY_LEVELS", "[benchmark][sparsity]") {
     g_T0.reset();
     knowhere::KnowhereConfig::SetSimdType(knowhere::KnowhereConfig::SimdType::AUTO);
 
