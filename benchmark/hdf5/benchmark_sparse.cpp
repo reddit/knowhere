@@ -13,6 +13,12 @@
 
 #include <thread>
 #include <vector>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
+#include <iomanip>
+#include <cstdio>
+#include <nlohmann/json.hpp>
 
 #include "benchmark_sparse.h"
 #include "knowhere/bitsetview.h"
@@ -27,6 +33,156 @@ using namespace sparse_benchmark;
 
 // Global timer for tracking total benchmark time
 static Timer g_T0;
+
+// Get current git branch name
+static std::string
+GetGitBranch() {
+    FILE* fp = popen("git rev-parse --abbrev-ref HEAD 2>/dev/null", "r");
+    if (!fp) return "unknown";
+
+    char buffer[128];
+    std::string result;
+    while (fgets(buffer, sizeof(buffer), fp) != nullptr) {
+        result += buffer;
+    }
+    pclose(fp);
+
+    // Remove trailing newline
+    if (!result.empty() && result.back() == '\n') {
+        result.pop_back();
+    }
+    return result.empty() ? "unknown" : result;
+}
+
+// Get git commit hash
+static std::string
+GetGitCommit() {
+    FILE* fp = popen("git rev-parse HEAD 2>/dev/null", "r");
+    if (!fp) return "unknown";
+
+    char buffer[128];
+    std::string result;
+    while (fgets(buffer, sizeof(buffer), fp) != nullptr) {
+        result += buffer;
+    }
+    pclose(fp);
+
+    // Remove trailing newline
+    if (!result.empty() && result.back() == '\n') {
+        result.pop_back();
+    }
+    return result.empty() ? "unknown" : result;
+}
+
+// Structure to hold complete benchmark result information
+struct BenchmarkResult {
+    // Git information
+    std::string git_branch;
+    std::string git_commit;
+
+    // Test metadata
+    std::string test_name;
+    std::string algorithm;
+    std::string metric;
+    int32_t topk = 0;
+    float drop_ratio_search = 0.0f;
+    float drop_ratio_build = 0.0f;
+
+    // Data configuration
+    DataGenConfig data_config;
+
+    // Filter configuration
+    FilterConfig filter_config;
+    bool has_filter = false;
+
+    // Performance results
+    BenchmarkStats stats;
+
+    // Timing and system information
+    std::string timestamp;
+    std::string start_time;
+    std::string end_time;
+    size_t num_search_threads = 0;
+
+    nlohmann::json to_json() const {
+        nlohmann::json j;
+
+        // Git information
+        j["git"]["branch"] = git_branch;
+        j["git"]["commit"] = git_commit;
+
+        // Test metadata
+        j["test"]["name"] = test_name;
+        j["test"]["algorithm"] = algorithm;
+        j["test"]["metric"] = metric;
+        j["test"]["topk"] = topk;
+        j["test"]["drop_ratio_search"] = drop_ratio_search;
+        j["test"]["drop_ratio_build"] = drop_ratio_build;
+        j["test"]["timestamp"] = timestamp;
+        j["test"]["start_time"] = start_time;
+        j["test"]["end_time"] = end_time;
+        j["test"]["num_search_threads"] = num_search_threads;
+
+        // Data configuration
+        j["data"]["num_docs"] = data_config.num_docs;
+        j["data"]["num_dims"] = data_config.num_dims;
+        j["data"]["doc_sparsity"] = data_config.doc_sparsity;
+        j["data"]["query_sparsity"] = data_config.query_sparsity;
+        j["data"]["num_queries"] = data_config.num_queries;
+        j["data"]["distribution"] = DataDistributionToString(data_config.distribution);
+        j["data"]["zipf_alpha"] = data_config.zipf_alpha;
+        j["data"]["max_value"] = data_config.max_value;
+        j["data"]["use_integer_values"] = data_config.use_integer_values;
+        j["data"]["max_tf"] = data_config.max_tf;
+        j["data"]["seed"] = data_config.seed;
+
+        // Filter configuration
+        j["filter"]["has_filter"] = has_filter;
+        if (has_filter) {
+            j["filter"]["distribution"] = FilterDistributionToString(filter_config.distribution);
+            j["filter"]["filter_ratio"] = filter_config.filter_ratio;
+            j["filter"]["seed"] = filter_config.seed;
+        }
+
+        // Performance results
+        j["performance"]["total_queries"] = stats.total_queries;
+        j["performance"]["total_time_s"] = stats.total_time_s;
+        j["performance"]["qps"] = stats.qps();
+        j["performance"]["mean_latency_us"] = stats.mean_latency_us();
+        j["performance"]["p50_latency_us"] = stats.p50_latency_us();
+        j["performance"]["p90_latency_us"] = stats.p90_latency_us();
+        j["performance"]["p99_latency_us"] = stats.p99_latency_us();
+        j["performance"]["recall"] = stats.recall;
+
+        return j;
+    }
+};
+
+// Write benchmark result to JSON file
+static void
+WriteBenchmarkResult(const BenchmarkResult& result) {
+    // Create results directory if it doesn't exist
+    std::filesystem::create_directories("benchmark_results");
+
+    // Generate filename with timestamp and test name
+    auto now = std::chrono::system_clock::now();
+    auto time_t = std::chrono::system_clock::to_time_t(now);
+    std::stringstream ss;
+    ss << std::put_time(std::gmtime(&time_t), "%Y%m%d_%H%M%S");
+    std::string timestamp_str = ss.str();
+
+    std::string filename = "benchmark_results/" + result.git_branch + "_" + result.test_name + "_" + timestamp_str + ".json";
+
+    // Write JSON to file
+    std::ofstream file(filename);
+    if (file.is_open()) {
+        file << result.to_json().dump(2);
+        file.close();
+        printf("JSON result written to: %s\n", filename.c_str());
+    } else {
+        printf("Failed to write JSON result to: %s\n", filename.c_str());
+    }
+}
 
 // Build index with specified algorithm
 static knowhere::Index<knowhere::IndexNode>
@@ -79,7 +235,10 @@ CreateSingleQueryDataset(const knowhere::DataSetPtr& query_ds, int64_t query_idx
 static BenchmarkStats
 BenchmarkSearch(knowhere::Index<knowhere::IndexNode>& index, const knowhere::DataSetPtr& query_ds,
                 const knowhere::DataSetPtr& gt, const std::string& metric, int32_t topk, float drop_ratio_search,
-                const std::vector<uint8_t>& filter_data, int32_t num_docs, int32_t num_runs = 3) {
+                const std::vector<uint8_t>& filter_data, int32_t num_docs, int32_t num_runs = 3,
+                const std::string& test_name = "", const std::string& algorithm = "",
+                const DataGenConfig& data_config = {}, const FilterConfig& filter_config = {}, bool has_filter = false,
+                const std::string& start_time_str = "") {
     BenchmarkStats stats;
 
     knowhere::Json search_conf;
@@ -124,6 +283,39 @@ BenchmarkSearch(knowhere::Index<knowhere::IndexNode>& index, const knowhere::Dat
         if (final_result.has_value()) {
             stats.recall = CalcRecall(*gt, *final_result.value());
         }
+    }
+
+    // Write JSON result if test metadata is provided
+    if (!test_name.empty()) {
+        // Capture end time
+        auto end_time_point = std::chrono::system_clock::now();
+        auto end_time_t = std::chrono::system_clock::to_time_t(end_time_point);
+        std::stringstream end_ss;
+        end_ss << std::put_time(std::gmtime(&end_time_t), "%Y-%m-%dT%H:%M:%SZ");
+        std::string end_time_str = end_ss.str();
+
+        BenchmarkResult result;
+        result.git_branch = GetGitBranch();
+        result.git_commit = GetGitCommit();
+        result.test_name = test_name;
+        result.algorithm = algorithm;
+        result.metric = metric;
+        result.topk = topk;
+        result.drop_ratio_search = drop_ratio_search;
+        result.data_config = data_config;
+        result.filter_config = filter_config;
+        result.has_filter = has_filter;
+        result.stats = stats;
+
+        // Set timing information
+        result.start_time = start_time_str;
+        result.end_time = end_time_str;
+        result.num_search_threads = knowhere::KnowhereConfig::GetSearchThreadPoolSize();
+
+        // Set timestamp (same as end time for backward compatibility)
+        result.timestamp = end_time_str;
+
+        WriteBenchmarkResult(result);
     }
 
     return stats;
@@ -280,7 +472,16 @@ TEST_CASE("Benchmark_sparse: TEST_SEARCH_ALGORITHMS", "[benchmark][sparse]") {
 
             for (int32_t topk : topks) {
                 std::string test_name = algo + "_" + metric + "_k" + std::to_string(topk);
-                auto stats = BenchmarkSearch(index, query_ds, gt, metric, topk, 0.0f, {}, data_config.num_docs);
+
+                // Capture start time
+                auto start_time_point = std::chrono::system_clock::now();
+                auto start_time_t = std::chrono::system_clock::to_time_t(start_time_point);
+                std::stringstream start_ss;
+                start_ss << std::put_time(std::gmtime(&start_time_t), "%Y-%m-%dT%H:%M:%SZ");
+                std::string start_time_str = start_ss.str();
+
+                auto stats = BenchmarkSearch(index, query_ds, gt, metric, topk, 0.0f, {}, data_config.num_docs, 3,
+                                           test_name, algo, data_config, {}, false, start_time_str);
                 PrintBenchmarkResults(test_name, stats);
             }
         }
@@ -324,7 +525,16 @@ TEST_CASE("Benchmark_sparse: TEST_BM25_SEARCH", "[benchmark][sparse][bm25]") {
         auto index = BuildIndex(train_ds, algo, metric);
 
         std::string test_name = algo + "_BM25_k" + std::to_string(topk);
-        auto stats = BenchmarkSearch(index, query_ds, gt, metric, topk, 0.0f, {}, data_config.num_docs);
+
+        // Capture start time
+        auto start_time_point = std::chrono::system_clock::now();
+        auto start_time_t = std::chrono::system_clock::to_time_t(start_time_point);
+        std::stringstream start_ss;
+        start_ss << std::put_time(std::gmtime(&start_time_t), "%Y-%m-%dT%H:%M:%SZ");
+        std::string start_time_str = start_ss.str();
+
+        auto stats = BenchmarkSearch(index, query_ds, gt, metric, topk, 0.0f, {}, data_config.num_docs, 3,
+                                   test_name, algo, data_config, {}, false, start_time_str);
         PrintBenchmarkResults(test_name, stats);
     }
 
@@ -352,7 +562,19 @@ TEST_CASE("Benchmark_sparse: TEST_BM25_SEARCH", "[benchmark][sparse][bm25]") {
 
                 std::string test_name = algo + "_BM25_filter_" + FilterDistributionToString(filter_dist) + "_" +
                                         std::to_string(static_cast<int>(filter_ratio * 100)) + "pct";
-                auto stats = BenchmarkSearch(index, query_ds, filtered_gt, metric, topk, 0.0f, filter_data, data_config.num_docs);
+                FilterConfig current_filter_config = filter_config;
+                current_filter_config.distribution = filter_dist;
+                current_filter_config.filter_ratio = filter_ratio;
+
+                // Capture start time
+                auto start_time_point = std::chrono::system_clock::now();
+                auto start_time_t = std::chrono::system_clock::to_time_t(start_time_point);
+                std::stringstream start_ss;
+                start_ss << std::put_time(std::gmtime(&start_time_t), "%Y-%m-%dT%H:%M:%SZ");
+                std::string start_time_str = start_ss.str();
+
+                auto stats = BenchmarkSearch(index, query_ds, filtered_gt, metric, topk, 0.0f, filter_data, data_config.num_docs, 3,
+                                           test_name, algo, data_config, current_filter_config, true, start_time_str);
                 PrintBenchmarkResults(test_name, stats);
             }
         }
@@ -413,7 +635,19 @@ TEST_CASE("Benchmark_sparse: TEST_QUICK_BM25_FILTER_MAXSCORE", "[benchmark][spar
 
             std::string test_name = algorithm + "_BM25_filter_" + FilterDistributionToString(filter_dist) + "_" +
                                     std::to_string(static_cast<int>(filter_ratio * 100)) + "pct";
-            auto stats = BenchmarkSearch(index, query_ds, filtered_gt, metric, topk, 0.0f, filter_data, data_config.num_docs);
+            FilterConfig current_filter_config;
+            current_filter_config.distribution = filter_dist;
+            current_filter_config.filter_ratio = filter_ratio;
+
+            // Capture start time
+            auto start_time_point = std::chrono::system_clock::now();
+            auto start_time_t = std::chrono::system_clock::to_time_t(start_time_point);
+            std::stringstream start_ss;
+            start_ss << std::put_time(std::gmtime(&start_time_t), "%Y-%m-%dT%H:%M:%SZ");
+            std::string start_time_str = start_ss.str();
+
+            auto stats = BenchmarkSearch(index, query_ds, filtered_gt, metric, topk, 0.0f, filter_data, data_config.num_docs, 3,
+                                       test_name, algorithm, data_config, current_filter_config, true, start_time_str);
             PrintBenchmarkResults(test_name, stats);
         }
     }
@@ -471,8 +705,16 @@ TEST_CASE("Benchmark_sparse: TEST_FILTERED_SEARCH", "[benchmark][sparse][filter]
                 std::string test_name = algo + "_filter_" + FilterDistributionToString(filter_dist) + "_" +
                                         std::to_string(static_cast<int>(filter_ratio * 100)) + "pct";
 
+                // Capture start time
+                auto start_time_point = std::chrono::system_clock::now();
+                auto start_time_t = std::chrono::system_clock::to_time_t(start_time_point);
+                std::stringstream start_ss;
+                start_ss << std::put_time(std::gmtime(&start_time_t), "%Y-%m-%dT%H:%M:%SZ");
+                std::string start_time_str = start_ss.str();
+
                 auto stats =
-                    BenchmarkSearch(index, query_ds, gt, metric, topk, 0.0f, filter_data, data_config.num_docs);
+                    BenchmarkSearch(index, query_ds, gt, metric, topk, 0.0f, filter_data, data_config.num_docs, 3,
+                                   test_name, algo, data_config, filter_config, true, start_time_str);
                 PrintBenchmarkResults(test_name, stats);
             }
         }
@@ -588,8 +830,20 @@ TEST_CASE("Benchmark_sparse: TEST_CURSOR_SEEK_PATTERNS", "[benchmark][sparse][se
                 std::string test_name =
                     algo + "_" + DataDistributionToString(dist) + "_" + FilterDistributionToString(filter_dist);
 
+                FilterConfig current_filter_config;
+                current_filter_config.distribution = filter_dist;
+                current_filter_config.filter_ratio = filter_ratio;
+
+                // Capture start time
+                auto start_time_point = std::chrono::system_clock::now();
+                auto start_time_t = std::chrono::system_clock::to_time_t(start_time_point);
+                std::stringstream start_ss;
+                start_ss << std::put_time(std::gmtime(&start_time_t), "%Y-%m-%dT%H:%M:%SZ");
+                std::string start_time_str = start_ss.str();
+
                 auto stats =
-                    BenchmarkSearch(index, query_ds, filtered_gt, metric, topk, 0.0f, filter_data, data_config.num_docs);
+                    BenchmarkSearch(index, query_ds, filtered_gt, metric, topk, 0.0f, filter_data, data_config.num_docs, 3,
+                                   test_name, algo, data_config, current_filter_config, filter_dist != FilterDistribution::NONE, start_time_str);
                 PrintBenchmarkResults(test_name, stats);
             }
         }
@@ -667,6 +921,34 @@ TEST_CASE("Benchmark_sparse: TEST_DROP_RATIO_SEARCH", "[benchmark][sparse][drop_
                 stats.recall = CalcRecall(*gt, *final_result.value());
             }
 
+            // Write JSON result for drop ratio test
+            BenchmarkResult result;
+            result.git_branch = GetGitBranch();
+            result.git_commit = GetGitCommit();
+            result.test_name = test_name;
+            result.algorithm = algo;
+            result.metric = metric;
+            result.topk = topk;
+            result.drop_ratio_search = drop_ratio;
+            result.data_config = data_config;
+            result.filter_config = {};
+            result.has_filter = false;
+            result.stats = stats;
+
+            // Set timing information
+            result.start_time = "";  // Drop ratio test doesn't capture start time separately
+            auto end_time_point = std::chrono::system_clock::now();
+            auto end_time_t = std::chrono::system_clock::to_time_t(end_time_point);
+            std::stringstream end_ss;
+            end_ss << std::put_time(std::gmtime(&end_time_t), "%Y-%m-%dT%H:%M:%SZ");
+            result.end_time = end_ss.str();
+            result.num_search_threads = knowhere::KnowhereConfig::GetSearchThreadPoolSize();
+
+            // Set timestamp (same as end time for backward compatibility)
+            result.timestamp = result.end_time;
+
+            WriteBenchmarkResult(result);
+
             PrintBenchmarkResults(test_name, stats);
         }
     }
@@ -706,7 +988,16 @@ TEST_CASE("Benchmark_sparse: TEST_SCALABILITY", "[benchmark][sparse][scalability
         auto index = BuildIndex(train_ds, algo, metric);
 
         std::string test_name = algo + "_" + std::to_string(num_docs) + "_docs";
-        auto stats = BenchmarkSearch(index, query_ds, gt, metric, topk, 0.0f, {}, data_config.num_docs);
+
+        // Capture start time
+        auto start_time_point = std::chrono::system_clock::now();
+        auto start_time_t = std::chrono::system_clock::to_time_t(start_time_point);
+        std::stringstream start_ss;
+        start_ss << std::put_time(std::gmtime(&start_time_t), "%Y-%m-%dT%H:%M:%SZ");
+        std::string start_time_str = start_ss.str();
+
+        auto stats = BenchmarkSearch(index, query_ds, gt, metric, topk, 0.0f, {}, data_config.num_docs, 3,
+                                   test_name, algo, data_config, {}, false, start_time_str);
         PrintBenchmarkResults(test_name, stats);
 
         // Also test with filter
@@ -717,8 +1008,19 @@ TEST_CASE("Benchmark_sparse: TEST_SCALABILITY", "[benchmark][sparse][scalability
         auto filtered_gt = GenerateGroundTruth(train_ds, query_ds, metric, topk, filter_data, data_config.num_docs);
 
         std::string filtered_test_name = algo + "_" + std::to_string(num_docs) + "_docs_filtered_50pct";
+        FilterConfig current_filter_config;
+        current_filter_config.distribution = FilterDistribution::RANDOM;
+        current_filter_config.filter_ratio = 0.5f;
+        // Capture start time
+        auto start_time_point = std::chrono::system_clock::now();
+        auto start_time_t = std::chrono::system_clock::to_time_t(start_time_point);
+        std::stringstream start_ss;
+        start_ss << std::put_time(std::gmtime(&start_time_t), "%Y-%m-%dT%H:%M:%SZ");
+        std::string start_time_str = start_ss.str();
+
         auto filtered_stats =
-            BenchmarkSearch(index, query_ds, filtered_gt, metric, topk, 0.0f, filter_data, data_config.num_docs);
+            BenchmarkSearch(index, query_ds, filtered_gt, metric, topk, 0.0f, filter_data, data_config.num_docs, 3,
+                           filtered_test_name, algo, data_config, current_filter_config, true, start_time_str);
         PrintBenchmarkResults(filtered_test_name, filtered_stats);
     }
 }
@@ -758,7 +1060,16 @@ TEST_CASE("Benchmark_sparse: TEST_SPARSITY_LEVELS", "[benchmark][sparse][sparsit
         auto index = BuildIndex(train_ds, algo, metric);
 
         std::string test_name = algo + "_sparsity_" + std::to_string(static_cast<int>(sparsity * 1000)) + "ppt";
-        auto stats = BenchmarkSearch(index, query_ds, gt, metric, topk, 0.0f, {}, data_config.num_docs);
+
+        // Capture start time
+        auto start_time_point = std::chrono::system_clock::now();
+        auto start_time_t = std::chrono::system_clock::to_time_t(start_time_point);
+        std::stringstream start_ss;
+        start_ss << std::put_time(std::gmtime(&start_time_t), "%Y-%m-%dT%H:%M:%SZ");
+        std::string start_time_str = start_ss.str();
+
+        auto stats = BenchmarkSearch(index, query_ds, gt, metric, topk, 0.0f, {}, data_config.num_docs, 3,
+                                   test_name, algo, data_config, {}, false, start_time_str);
         PrintBenchmarkResults(test_name, stats);
     }
 }
