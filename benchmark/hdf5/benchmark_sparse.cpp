@@ -82,6 +82,7 @@ struct BenchmarkResult {
 
     // Test metadata
     std::string test_name;
+    std::string description;  // Description of what this test measures
     std::string algorithm;
     std::string metric;
     int32_t topk = 0;
@@ -113,6 +114,7 @@ struct BenchmarkResult {
 
         // Test metadata
         j["test"]["name"] = test_name;
+        j["test"]["description"] = description;
         j["test"]["algorithm"] = algorithm;
         j["test"]["metric"] = metric;
         j["test"]["topk"] = topk;
@@ -236,7 +238,8 @@ static BenchmarkStats
 BenchmarkSearch(knowhere::Index<knowhere::IndexNode>& index, const knowhere::DataSetPtr& query_ds,
                 const knowhere::DataSetPtr& gt, const std::string& metric, int32_t topk, float drop_ratio_search,
                 const std::vector<uint8_t>& filter_data, int32_t num_docs, int32_t num_runs = 3,
-                const std::string& test_name = "", const std::string& algorithm = "",
+                const std::string& test_name = "", const std::string& description = "",
+                const std::string& algorithm = "",
                 const DataGenConfig& data_config = {}, const FilterConfig& filter_config = {}, bool has_filter = false,
                 const std::string& start_time_str = "") {
     BenchmarkStats stats;
@@ -298,6 +301,7 @@ BenchmarkSearch(knowhere::Index<knowhere::IndexNode>& index, const knowhere::Dat
         result.git_branch = GetGitBranch();
         result.git_commit = GetGitCommit();
         result.test_name = test_name;
+        result.description = description;
         result.algorithm = algorithm;
         result.metric = metric;
         result.topk = topk;
@@ -449,16 +453,18 @@ TEST_CASE("Benchmark_sparse: TEST_SEARCH_ALGORITHMS", "[benchmark][sparse]") {
     data_config.doc_sparsity = 0.97f;  // ~900 non-zeros per doc
     data_config.query_sparsity = 0.9998f;  // ~6 terms per query instead of 300
     data_config.num_queries = 500;
-    data_config.distribution = DataDistribution::UNIFORM;
+    data_config.distribution = DataDistribution::ZIPF;  // Use Zipf for more realistic term distributions
+    data_config.use_integer_values = true;  // Use integer term frequencies for BM25
+    data_config.max_tf = 256;  // Maximum term frequency
 
-    printf("[%.3f s] Generating data: %d docs, %d dims, sparsity=%.2f\n", g_T0.elapsed_seconds(), data_config.num_docs,
-           data_config.num_dims, data_config.doc_sparsity);
+    printf("[%.3f s] Generating BM25 data: %d docs, %d dims, Zipf distribution (~6 terms/query)\n",
+           g_T0.elapsed_seconds(), data_config.num_docs, data_config.num_dims);
 
     auto train_ds = GenSparseDataSetWithDistribution(data_config);
     auto query_ds = GenSparseQuerySet(data_config);
 
     std::vector<std::string> algorithms = {"TAAT_NAIVE", "DAAT_WAND", "DAAT_MAXSCORE"};
-    std::vector<std::string> metrics = {knowhere::metric::IP};
+    std::vector<std::string> metrics = {knowhere::metric::BM25};  // Focus on BM25 for text search
     std::vector<int32_t> topks = {10, 100};
 
     for (const auto& metric : metrics) {
@@ -481,7 +487,8 @@ TEST_CASE("Benchmark_sparse: TEST_SEARCH_ALGORITHMS", "[benchmark][sparse]") {
                 std::string start_time_str = start_ss.str();
 
                 auto stats = BenchmarkSearch(index, query_ds, gt, metric, topk, 0.0f, {}, data_config.num_docs, 3,
-                                           test_name, algo, data_config, {}, false, start_time_str);
+                                           test_name, "Compares performance of TAAT_NAIVE, DAAT_WAND, and DAAT_MAXSCORE search algorithms using BM25 metric",
+                                           algo, data_config, {}, false, start_time_str);
                 PrintBenchmarkResults(test_name, stats);
             }
         }
@@ -534,7 +541,8 @@ TEST_CASE("Benchmark_sparse: TEST_BM25_SEARCH", "[benchmark][sparse][bm25]") {
         std::string start_time_str = start_ss.str();
 
         auto stats = BenchmarkSearch(index, query_ds, gt, metric, topk, 0.0f, {}, data_config.num_docs, 3,
-                                   test_name, algo, data_config, {}, false, start_time_str);
+                                   test_name, "Tests BM25 search performance without filters for different algorithms",
+                                   algo, data_config, {}, false, start_time_str);
         PrintBenchmarkResults(test_name, stats);
     }
 
@@ -574,7 +582,8 @@ TEST_CASE("Benchmark_sparse: TEST_BM25_SEARCH", "[benchmark][sparse][bm25]") {
                 std::string start_time_str = start_ss.str();
 
                 auto stats = BenchmarkSearch(index, query_ds, filtered_gt, metric, topk, 0.0f, filter_data, data_config.num_docs, 3,
-                                           test_name, algo, data_config, current_filter_config, true, start_time_str);
+                                           test_name, "Tests BM25 search performance with filters to exercise galloping search optimization",
+                                           algo, data_config, current_filter_config, true, start_time_str);
                 PrintBenchmarkResults(test_name, stats);
             }
         }
@@ -647,7 +656,8 @@ TEST_CASE("Benchmark_sparse: TEST_QUICK_BM25_FILTER_MAXSCORE", "[benchmark][spar
             std::string start_time_str = start_ss.str();
 
             auto stats = BenchmarkSearch(index, query_ds, filtered_gt, metric, topk, 0.0f, filter_data, data_config.num_docs, 3,
-                                       test_name, algorithm, data_config, current_filter_config, true, start_time_str);
+                                       test_name, "Quick test of BM25 search with filters using DAAT_MAXSCORE algorithm",
+                                       algorithm, data_config, current_filter_config, true, start_time_str);
             PrintBenchmarkResults(test_name, stats);
         }
     }
@@ -669,20 +679,22 @@ TEST_CASE("Benchmark_sparse: TEST_FILTERED_SEARCH", "[benchmark][sparse][filter]
     data_config.doc_sparsity = 0.97f;
     data_config.query_sparsity = 0.9998f;  // ~6 terms per query instead of 300
     data_config.num_queries = 500;
-    data_config.distribution = DataDistribution::UNIFORM;
+    data_config.distribution = DataDistribution::ZIPF;  // Use Zipf for BM25
+    data_config.use_integer_values = true;  // Integer term frequencies for BM25
+    data_config.max_tf = 256;
 
-    printf("[%.3f s] Generating data: %d docs, %d dims\n", g_T0.elapsed_seconds(), data_config.num_docs,
-           data_config.num_dims);
+    printf("[%.3f s] Generating BM25 data: %d docs, %d dims, Zipf distribution\n", g_T0.elapsed_seconds(),
+           data_config.num_docs, data_config.num_dims);
 
     auto train_ds = GenSparseDataSetWithDistribution(data_config);
     auto query_ds = GenSparseQuerySet(data_config);
 
     std::vector<std::string> algorithms = {"DAAT_WAND", "DAAT_MAXSCORE"};
-    std::string metric = knowhere::metric::IP;
+    std::string metric = knowhere::metric::BM25;
     int32_t topk = 10;
 
     std::vector<FilterDistribution> filter_distributions = {
-        FilterDistribution::FIRST_N,     FilterDistribution::LAST_N,
+        //FilterDistribution::FIRST_N,     FilterDistribution::LAST_N, // Not Useful
         FilterDistribution::RANDOM,      FilterDistribution::CLUSTERED,
         FilterDistribution::REVERSE_POSTING_ORDER,
     };
@@ -714,7 +726,8 @@ TEST_CASE("Benchmark_sparse: TEST_FILTERED_SEARCH", "[benchmark][sparse][filter]
 
                 auto stats =
                     BenchmarkSearch(index, query_ds, gt, metric, topk, 0.0f, filter_data, data_config.num_docs, 3,
-                                   test_name, algo, data_config, filter_config, true, start_time_str);
+                                   test_name, "Tests BM25 search performance with various filter distributions and ratios",
+                                   algo, data_config, filter_config, true, start_time_str);
                 PrintBenchmarkResults(test_name, stats);
             }
         }
@@ -725,7 +738,7 @@ TEST_CASE("Benchmark_sparse: TEST_FILTERED_SEARCH", "[benchmark][sparse][filter]
 // Test: Iterator/GetAllDistances performance
 // This tests the SIMD optimization for compute_all_distances via the Iterator API
 // ============================================================================
-TEST_CASE("Benchmark_sparse: TEST_ITERATOR", "[benchmark][sparse][iterator]") {
+TEST_CASE("Benchmark_sparse: TEST_ITERATOR", "[benchmark][iterator]") {
     g_T0.reset();
     knowhere::KnowhereConfig::SetSimdType(knowhere::KnowhereConfig::SimdType::AUTO);
 
@@ -746,7 +759,7 @@ TEST_CASE("Benchmark_sparse: TEST_ITERATOR", "[benchmark][sparse][iterator]") {
     auto train_ds = GenSparseDataSetWithDistribution(data_config);
     auto query_ds = GenSparseQuerySet(data_config);
 
-    std::vector<std::string> metrics = {knowhere::metric::IP, knowhere::metric::BM25};
+    std::vector<std::string> metrics = {knowhere::metric::BM25};  // Focus on BM25 for text search
 
     for (const auto& metric : metrics) {
         printf("\n--- Metric: %s ---\n", metric.c_str());
@@ -788,7 +801,7 @@ TEST_CASE("Benchmark_sparse: TEST_CURSOR_SEEK_PATTERNS", "[benchmark][sparse][se
     std::vector<DataDistribution> distributions = {DataDistribution::UNIFORM, DataDistribution::ZIPF,
                                                    DataDistribution::SKEWED_DIMS};
 
-    std::string metric = knowhere::metric::IP;
+    std::string metric = knowhere::metric::BM25;
     int32_t topk = 10;
 
     for (auto dist : distributions) {
@@ -814,8 +827,8 @@ TEST_CASE("Benchmark_sparse: TEST_CURSOR_SEEK_PATTERNS", "[benchmark][sparse][se
 
             std::vector<std::pair<FilterDistribution, float>> filter_configs = {
                 {FilterDistribution::NONE, 0.0f},
-                {FilterDistribution::FIRST_N, 0.5f},
-                {FilterDistribution::LAST_N, 0.5f},
+                //{FilterDistribution::FIRST_N, 0.5f},
+                //{FilterDistribution::LAST_N, 0.5f},
                 {FilterDistribution::ALTERNATING, 0.5f},
             };
 
@@ -843,7 +856,8 @@ TEST_CASE("Benchmark_sparse: TEST_CURSOR_SEEK_PATTERNS", "[benchmark][sparse][se
 
                 auto stats =
                     BenchmarkSearch(index, query_ds, filtered_gt, metric, topk, 0.0f, filter_data, data_config.num_docs, 3,
-                                   test_name, algo, data_config, current_filter_config, filter_dist != FilterDistribution::NONE, start_time_str);
+                                   test_name, "Tests cursor seek patterns and filter-aware optimizations with different data distributions",
+                                   algo, data_config, current_filter_config, filter_dist != FilterDistribution::NONE, start_time_str);
                 PrintBenchmarkResults(test_name, stats);
             }
         }
@@ -866,14 +880,16 @@ TEST_CASE("Benchmark_sparse: TEST_DROP_RATIO_SEARCH", "[benchmark][sparse][drop_
     data_config.doc_sparsity = 0.97f;
     data_config.query_sparsity = 0.9998f;  // ~6 terms per query instead of 300
     data_config.num_queries = 500;
-    data_config.distribution = DataDistribution::UNIFORM;
+    data_config.distribution = DataDistribution::ZIPF;  // Use Zipf for BM25
+    data_config.use_integer_values = true;  // Integer term frequencies for BM25
+    data_config.max_tf = 256;
 
-    printf("[%.3f s] Generating data\n", g_T0.elapsed_seconds());
+    printf("[%.3f s] Generating BM25 data\n", g_T0.elapsed_seconds());
 
     auto train_ds = GenSparseDataSetWithDistribution(data_config);
     auto query_ds = GenSparseQuerySet(data_config);
 
-    std::string metric = knowhere::metric::IP;
+    std::string metric = knowhere::metric::BM25;
     int32_t topk = 10;
 
     auto gt = GenerateGroundTruth(train_ds, query_ds, metric, topk, {}, data_config.num_docs);
@@ -926,6 +942,7 @@ TEST_CASE("Benchmark_sparse: TEST_DROP_RATIO_SEARCH", "[benchmark][sparse][drop_
             result.git_branch = GetGitBranch();
             result.git_commit = GetGitCommit();
             result.test_name = test_name;
+            result.description = "Tests impact of drop_ratio_search parameter on search performance and recall";
             result.algorithm = algo;
             result.metric = metric;
             result.topk = topk;
@@ -965,7 +982,7 @@ TEST_CASE("Benchmark_sparse: TEST_SCALABILITY", "[benchmark][sparse][scalability
     printf("================================================================================\n");
 
     std::vector<int32_t> num_docs_list = {10000, 50000, 100000, 200000};
-    std::string metric = knowhere::metric::IP;
+    std::string metric = knowhere::metric::BM25;
     int32_t topk = 10;
     std::string algo = "DAAT_MAXSCORE";
 
@@ -976,7 +993,9 @@ TEST_CASE("Benchmark_sparse: TEST_SCALABILITY", "[benchmark][sparse][scalability
         data_config.doc_sparsity = 0.97f;
         data_config.query_sparsity = 0.9998f;  // ~6 terms per query instead of 300
         data_config.num_queries = 500;
-        data_config.distribution = DataDistribution::UNIFORM;
+        data_config.distribution = DataDistribution::ZIPF;  // Use Zipf for BM25
+        data_config.use_integer_values = true;  // Integer term frequencies for BM25
+        data_config.max_tf = 256;
 
         printf("\n=== Dataset Size: %d docs ===\n", num_docs);
         printf("[%.3f s] Generating data\n", g_T0.elapsed_seconds());
@@ -997,7 +1016,8 @@ TEST_CASE("Benchmark_sparse: TEST_SCALABILITY", "[benchmark][sparse][scalability
         std::string start_time_str = start_ss.str();
 
         auto stats = BenchmarkSearch(index, query_ds, gt, metric, topk, 0.0f, {}, data_config.num_docs, 3,
-                                   test_name, algo, data_config, {}, false, start_time_str);
+                                   test_name, "Tests BM25 search scalability with different dataset sizes",
+                                   algo, data_config, {}, false, start_time_str);
         PrintBenchmarkResults(test_name, stats);
 
         // Also test with filter
@@ -1020,9 +1040,10 @@ TEST_CASE("Benchmark_sparse: TEST_SCALABILITY", "[benchmark][sparse][scalability
             start_ss << std::put_time(std::gmtime(&start_time_t), "%Y-%m-%dT%H:%M:%SZ");
             std::string start_time_str = start_ss.str();
 
-            auto filtered_stats =
-                BenchmarkSearch(index, query_ds, filtered_gt, metric, topk, 0.0f, filter_data, data_config.num_docs, 3,
-                               filtered_test_name, algo, data_config, current_filter_config, true, start_time_str);
+        auto filtered_stats =
+            BenchmarkSearch(index, query_ds, filtered_gt, metric, topk, 0.0f, filter_data, data_config.num_docs, 3,
+                           filtered_test_name, "Tests BM25 search scalability with filters at different dataset sizes",
+                           algo, data_config, current_filter_config, true, start_time_str);
             PrintBenchmarkResults(filtered_test_name, filtered_stats);
         }
     }
@@ -1039,7 +1060,7 @@ TEST_CASE("Benchmark_sparse: TEST_SPARSITY_LEVELS", "[benchmark][sparse][sparsit
     printf("================================================================================\n");
 
     std::vector<float> sparsity_levels = {0.95f, 0.97f, 0.99f, 0.995f};
-    std::string metric = knowhere::metric::IP;
+    std::string metric = knowhere::metric::BM25;
     int32_t topk = 10;
     std::string algo = "DAAT_MAXSCORE";
 
@@ -1050,7 +1071,9 @@ TEST_CASE("Benchmark_sparse: TEST_SPARSITY_LEVELS", "[benchmark][sparse][sparsit
         data_config.doc_sparsity = sparsity;
         data_config.query_sparsity = sparsity + 0.005f;
         data_config.num_queries = 500;
-        data_config.distribution = DataDistribution::UNIFORM;
+        data_config.distribution = DataDistribution::ZIPF;  // Use Zipf for BM25
+        data_config.use_integer_values = true;  // Integer term frequencies for BM25
+        data_config.max_tf = 256;
 
         int32_t avg_nnz = static_cast<int32_t>(data_config.num_dims * (1.0f - sparsity));
         printf("\n=== Sparsity: %.3f (avg nnz per doc: %d) ===\n", sparsity, avg_nnz);
@@ -1072,7 +1095,8 @@ TEST_CASE("Benchmark_sparse: TEST_SPARSITY_LEVELS", "[benchmark][sparse][sparsit
         std::string start_time_str = start_ss.str();
 
         auto stats = BenchmarkSearch(index, query_ds, gt, metric, topk, 0.0f, {}, data_config.num_docs, 3,
-                                   test_name, algo, data_config, {}, false, start_time_str);
+                                   test_name, "Tests BM25 search performance at different document sparsity levels",
+                                   algo, data_config, {}, false, start_time_str);
         PrintBenchmarkResults(test_name, stats);
     }
 }
