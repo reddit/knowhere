@@ -386,7 +386,7 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
         auto load_progress_interval = rows / 10;
         for (int64_t i = 0; i < rows; ++i) {
             if (load_progress_interval > 0 && i % load_progress_interval == 0) {
-                LOG_KNOWHERE_DEBUG_ << "Sparse Inverted Index loading progress: " << (i / load_progress_interval * 10)
+                LOG_KNOWHERE_INFO_ << "Sparse Inverted Index loading progress: " << (i / load_progress_interval * 10)
                                    << "%";
             }
 
@@ -407,7 +407,7 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
             index_dataset_nnz_len_histogram_->Observe(count);
 #endif
         }
-        LOG_KNOWHERE_DEBUG_ << "Sparse Inverted Index loading progress: 100%";
+        LOG_KNOWHERE_INFO_ << "Sparse Inverted Index loading progress: 100%";
 
 #if defined(NOT_COMPILE_FOR_SWIG) && !defined(KNOWHERE_WITH_LIGHT)
         for (size_t i = 0; i < dim_map_.size(); ++i) {

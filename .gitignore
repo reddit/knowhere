@@ -1,4 +1,4 @@
-
+.cursor/
 # CLion generated files
 **/cmake-build-debug/*
 **/cmake-build-release/*
