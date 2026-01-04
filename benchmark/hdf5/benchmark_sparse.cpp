@@ -1001,27 +1001,30 @@ TEST_CASE("Benchmark_sparse: TEST_SCALABILITY", "[benchmark][sparse][scalability
         PrintBenchmarkResults(test_name, stats);
 
         // Also test with filter
-        FilterConfig filter_config;
-        filter_config.distribution = FilterDistribution::RANDOM;
-        filter_config.filter_ratio = 0.5f;
-        auto filter_data = GenFilterBitset(data_config.num_docs, filter_config);
-        auto filtered_gt = GenerateGroundTruth(train_ds, query_ds, metric, topk, filter_data, data_config.num_docs);
+        {
+            FilterConfig filter_config;
+            filter_config.distribution = FilterDistribution::RANDOM;
+            filter_config.filter_ratio = 0.5f;
+            auto filter_data = GenFilterBitset(data_config.num_docs, filter_config);
+            auto filtered_gt = GenerateGroundTruth(train_ds, query_ds, metric, topk, filter_data, data_config.num_docs);
 
-        std::string filtered_test_name = algo + "_" + std::to_string(num_docs) + "_docs_filtered_50pct";
-        FilterConfig current_filter_config;
-        current_filter_config.distribution = FilterDistribution::RANDOM;
-        current_filter_config.filter_ratio = 0.5f;
-        // Capture start time
-        auto start_time_point = std::chrono::system_clock::now();
-        auto start_time_t = std::chrono::system_clock::to_time_t(start_time_point);
-        std::stringstream start_ss;
-        start_ss << std::put_time(std::gmtime(&start_time_t), "%Y-%m-%dT%H:%M:%SZ");
-        std::string start_time_str = start_ss.str();
+            std::string filtered_test_name = algo + "_" + std::to_string(num_docs) + "_docs_filtered_50pct";
+            FilterConfig current_filter_config;
+            current_filter_config.distribution = FilterDistribution::RANDOM;
+            current_filter_config.filter_ratio = 0.5f;
 
-        auto filtered_stats =
-            BenchmarkSearch(index, query_ds, filtered_gt, metric, topk, 0.0f, filter_data, data_config.num_docs, 3,
-                           filtered_test_name, algo, data_config, current_filter_config, true, start_time_str);
-        PrintBenchmarkResults(filtered_test_name, filtered_stats);
+            // Capture start time
+            auto start_time_point = std::chrono::system_clock::now();
+            auto start_time_t = std::chrono::system_clock::to_time_t(start_time_point);
+            std::stringstream start_ss;
+            start_ss << std::put_time(std::gmtime(&start_time_t), "%Y-%m-%dT%H:%M:%SZ");
+            std::string start_time_str = start_ss.str();
+
+            auto filtered_stats =
+                BenchmarkSearch(index, query_ds, filtered_gt, metric, topk, 0.0f, filter_data, data_config.num_docs, 3,
+                               filtered_test_name, algo, data_config, current_filter_config, true, start_time_str);
+            PrintBenchmarkResults(filtered_test_name, filtered_stats);
+        }
     }
 }
 
