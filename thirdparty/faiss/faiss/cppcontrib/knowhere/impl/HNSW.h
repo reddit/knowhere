@@ -17,14 +17,13 @@
 #include <faiss/impl/AuxIndexStructures.h>
 #include <faiss/impl/DistanceComputer.h>
 #include <faiss/impl/FaissAssert.h>
+#include <faiss/impl/VisitedTable.h>
 #include <faiss/impl/maybe_owned_vector.h>
 #include <faiss/impl/platform_macros.h>
-#include <faiss/impl/VisitedTable.h>
 #include <faiss/utils/Heap.h>
 #include <faiss/utils/random.h>
 
 #include <faiss/cppcontrib/knowhere/impl/ResultHandler.h>
-
 
 namespace faiss {
 namespace cppcontrib {
@@ -244,11 +243,14 @@ struct HNSWStats {
             0; /// number of queries for which the candidate list is exhausted
     size_t ndis = 0;  /// number of distances computed
     size_t nhops = 0; /// number of hops aka number of edges traversed
+    double search_pool_queue_latency =
+            0.0; /// search_pool queue latency in milliseconds
 
     void reset() {
         n1 = n2 = 0;
         ndis = 0;
         nhops = 0;
+        search_pool_queue_latency = 0.0;
     }
 
     void combine(const HNSWStats& other) {
@@ -256,12 +258,13 @@ struct HNSWStats {
         n2 += other.n2;
         ndis += other.ndis;
         nhops += other.nhops;
+        search_pool_queue_latency += other.search_pool_queue_latency;
     }
 };
 
 // global var that collects them all
 FAISS_API extern HNSWStats hnsw_stats;
 
-}
-}
+} // namespace knowhere
+} // namespace cppcontrib
 } // namespace faiss

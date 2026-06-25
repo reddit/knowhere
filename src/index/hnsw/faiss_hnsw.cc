@@ -21,6 +21,7 @@
 #include <faiss/cppcontrib/knowhere/utils/Bitset.h>
 #include <faiss/utils/Heap.h>
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -1374,7 +1375,7 @@ class BaseFaissRegularIndexHNSWNode : public BaseFaissRegularIndexNode {
             hnsw_search_params.efSearch = hnsw_cfg.ef.value();
         }
 
-        // do not collect HNSW stats
+        // Search tasks use per-query HNSW stats to carry search_pool queue latency.
         hnsw_search_params.hnsw_stats = nullptr;
         // set up feder
         hnsw_search_params.feder = feder_result.get();
@@ -1393,11 +1394,20 @@ class BaseFaissRegularIndexHNSWNode : public BaseFaissRegularIndexNode {
         try {
             std::vector<folly::Future<folly::Unit>> futs;
             futs.reserve(rows);
+            std::vector<faiss::cppcontrib::knowhere::HNSWStats> hnsw_stats(rows);
 
             for (int64_t i = 0; i < rows; ++i) {
+                auto scheduled_time = std::chrono::steady_clock::now();
                 futs.emplace_back(search_pool->push([&, idx = i, is_refined = is_refined,
                                                      index_wrapper_ptr = index_wrapper_ptr,
-                                                     bf_index_wrapper_ptr = bf_index_wrapper_ptr]() {
+                                                     bf_index_wrapper_ptr = bf_index_wrapper_ptr,
+                                                     scheduled_time = scheduled_time]() {
+                    hnsw_stats[idx].search_pool_queue_latency =
+                        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - scheduled_time)
+                            .count();
+                    auto local_hnsw_search_params = hnsw_search_params;
+                    local_hnsw_search_params.hnsw_stats = &hnsw_stats[idx];
+
                     knowhere::checkCancellation(op_context);
                     // 1 thread per element
                     ThreadPool::ScopedSearchOmpSetter setter(1);
@@ -1442,17 +1452,18 @@ class BaseFaissRegularIndexHNSWNode : public BaseFaissRegularIndexNode {
                         refine_params.k_factor = hnsw_cfg.refine_k.value_or(1);
                         // a refine procedure itself does not need to care about filtering
                         refine_params.sel = nullptr;
-                        refine_params.base_index_params = &hnsw_search_params;
+                        refine_params.base_index_params = &local_hnsw_search_params;
 
                         index_wrapper_ptr->search(1, cur_query, k, local_distances, local_ids, &refine_params);
                         if (bf_search_needed()) {
                             bf_index_wrapper_ptr->search(1, cur_query, k, local_distances, local_ids, &refine_params);
                         }
                     } else {
-                        index_wrapper_ptr->search(1, cur_query, k, local_distances, local_ids, &hnsw_search_params);
+                        index_wrapper_ptr->search(1, cur_query, k, local_distances, local_ids,
+                                                  &local_hnsw_search_params);
                         if (bf_search_needed()) {
                             bf_index_wrapper_ptr->search(1, cur_query, k, local_distances, local_ids,
-                                                         &hnsw_search_params);
+                                                         &local_hnsw_search_params);
                         }
                     }
 
@@ -1466,6 +1477,11 @@ class BaseFaissRegularIndexHNSWNode : public BaseFaissRegularIndexNode {
 
             // wait for the completion
             WaitAllSuccess(futs);
+#if defined(NOT_COMPILE_FOR_SWIG) && !defined(KNOWHERE_WITH_LIGHT)
+            for (const auto& stats : hnsw_stats) {
+                knowhere::knowhere_hnsw_search_pool_queue_latency.Observe(stats.search_pool_queue_latency);
+            }
+#endif
         } catch (const std::exception& e) {
             LOG_KNOWHERE_WARNING_ << "faiss inner error: " << e.what();
             return expected<DataSetPtr>::Err(Status::faiss_inner_error, e.what());

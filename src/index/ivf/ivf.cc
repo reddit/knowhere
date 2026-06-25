@@ -14,6 +14,8 @@
 #include <faiss/cppcontrib/knowhere/IndexIVFScalarQuantizerCC.h>
 #include <faiss/cppcontrib/knowhere/IndexScaNN.h>
 
+#include <chrono>
+
 #include "common/metric.h"
 #include "faiss/IndexIVFPQFastScan.h"
 #include "faiss/IndexIVFRaBitQ.h"
@@ -45,6 +47,7 @@
 #include "knowhere/index/index_factory.h"
 #include "knowhere/index/index_node_data_mock_wrapper.h"
 #include "knowhere/log.h"
+#include "knowhere/prometheus_client.h"
 #include "knowhere/range_util.h"
 #include "knowhere/thread_pool.h"
 #include "knowhere/utils.h"
@@ -957,8 +960,13 @@ IvfIndexNode<DataType, IndexType>::Search(const DataSetPtr dataset, std::unique_
     try {
         std::vector<folly::Future<folly::Unit>> futs;
         futs.reserve(rows);
+        std::vector<double> search_pool_queue_latencies(rows);
         for (int i = 0; i < rows; ++i) {
-            futs.emplace_back(search_pool_->push([&, index = i] {
+            auto scheduled_time = std::chrono::steady_clock::now();
+            futs.emplace_back(search_pool_->push([&, index = i, scheduled_time = scheduled_time] {
+                search_pool_queue_latencies[index] =
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - scheduled_time)
+                        .count();
                 knowhere::checkCancellation(op_context);
                 ThreadPool::ScopedSearchOmpSetter setter(1);
                 auto offset = k * index;
@@ -1200,6 +1208,11 @@ IvfIndexNode<DataType, IndexType>::Search(const DataSetPtr dataset, std::unique_
         }
         // wait for the completion
         WaitAllSuccess(futs);
+#if defined(NOT_COMPILE_FOR_SWIG) && !defined(KNOWHERE_WITH_LIGHT)
+        for (const auto latency : search_pool_queue_latencies) {
+            knowhere::knowhere_ivf_search_pool_queue_latency.Observe(latency);
+        }
+#endif
     } catch (const std::exception& e) {
         LOG_KNOWHERE_WARNING_ << "faiss inner error: " << e.what();
         return expected<DataSetPtr>::Err(Status::faiss_inner_error, e.what());
