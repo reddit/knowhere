@@ -201,6 +201,7 @@ IndexHNSWWrapper::search(idx_t n, const float* __restrict x, idx_t k, float* __r
         // record some statistics
 #if defined(NOT_COMPILE_FOR_SWIG) && !defined(KNOWHERE_WITH_LIGHT)
         knowhere::knowhere_hnsw_search_hops.Observe(local_stats.nhops);
+        knowhere::knowhere_hnsw_search_ndis.Observe(local_stats.ndis);
 #endif
 
         // update stats if possible
@@ -366,6 +367,7 @@ IndexHNSWWrapper::range_search(idx_t n, const float* __restrict x, float radius_
         // record some statistics
 #if defined(NOT_COMPILE_FOR_SWIG) && !defined(KNOWHERE_WITH_LIGHT)
         knowhere::knowhere_hnsw_search_hops.Observe(local_stats.nhops);
+        knowhere::knowhere_hnsw_search_ndis.Observe(local_stats.ndis);
 #endif
 
         // update stats if possible

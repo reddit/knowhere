@@ -124,6 +124,15 @@ DEFINE_PROMETHEUS_HISTOGRAM_WITH_BUCKETS(hnsw_bitset_ratio, PROMETHEUS_LABEL_KNO
 DEFINE_PROMETHEUS_HISTOGRAM_FAMILY(hnsw_search_hops, "HNSW search hops in layer 0")
 DEFINE_PROMETHEUS_HISTOGRAM(hnsw_search_hops, PROMETHEUS_LABEL_KNOWHERE)
 
+DEFINE_PROMETHEUS_HISTOGRAM_FAMILY(hnsw_search_ndis, "HNSW search distance computations")
+DEFINE_PROMETHEUS_HISTOGRAM(hnsw_search_ndis, PROMETHEUS_LABEL_KNOWHERE)
+
+DEFINE_PROMETHEUS_HISTOGRAM_FAMILY(hnsw_search_pool_queue_latency, "HNSW search_pool queue latency for search (ms)")
+DEFINE_PROMETHEUS_HISTOGRAM(hnsw_search_pool_queue_latency, PROMETHEUS_LABEL_KNOWHERE)
+
+DEFINE_PROMETHEUS_HISTOGRAM_FAMILY(ivf_search_pool_queue_latency, "IVF search_pool queue latency for search (ms)")
+DEFINE_PROMETHEUS_HISTOGRAM(ivf_search_pool_queue_latency, PROMETHEUS_LABEL_KNOWHERE)
+
 DEFINE_PROMETHEUS_HISTOGRAM_FAMILY(diskann_bitset_ratio, "DISKANN bitset ratio for search and range search")
 DEFINE_PROMETHEUS_HISTOGRAM_WITH_BUCKETS(diskann_bitset_ratio, PROMETHEUS_LABEL_KNOWHERE, ratioBuckets)
 

@@ -240,11 +240,14 @@ struct HNSWStats {
             0; /// number of queries for which the candidate list is exhausted
     size_t ndis = 0;  /// number of distances computed
     size_t nhops = 0; /// number of hops aka number of edges traversed
+    double search_pool_queue_latency =
+            0.0; /// search_pool queue latency in milliseconds
 
     void reset() {
         n1 = n2 = 0;
         ndis = 0;
         nhops = 0;
+        search_pool_queue_latency = 0.0;
     }
 
     void combine(const HNSWStats& other) {
@@ -252,6 +255,7 @@ struct HNSWStats {
         n2 += other.n2;
         ndis += other.ndis;
         nhops += other.nhops;
+        search_pool_queue_latency += other.search_pool_queue_latency;
     }
 };
 
