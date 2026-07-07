@@ -42,6 +42,7 @@
 #include "index/hnsw/impl/IndexConditionalWrapper.h"
 #include "index/hnsw/impl/IndexHNSWWrapper.h"
 #include "index/hnsw/impl/IndexWrapperCosine.h"
+#include "index/hnsw/impl/hnsw_brute_force_env.h"
 #include "index/refine/refine_utils.h"
 #include "io/memory_io.h"
 #include "knowhere/bitsetview_idselector.h"
@@ -1336,7 +1337,7 @@ class BaseFaissRegularIndexHNSWNode : public BaseFaissRegularIndexNode {
         // set up a bf wrapper as fallback
         std::unique_ptr<faiss::Index> bf_index_wrapper = nullptr;
         faiss::Index* bf_index_wrapper_ptr = nullptr;
-        if (!whether_bf_search.value_or(false)) {
+        if (!whether_bf_search.value_or(false) && !IsHnswBruteForceDisabledByEnv()) {
             std::tie(bf_index_wrapper, is_refined) =
                 create_conditional_hnsw_wrapper(indexes[index_id].get(), hnsw_cfg, true, whether_to_enable_refine);
             if (bf_index_wrapper == nullptr) {
@@ -1415,7 +1416,8 @@ class BaseFaissRegularIndexHNSWNode : public BaseFaissRegularIndexNode {
                             real_topk++;
                         }
                         if (real_topk < k && real_topk < bitset.size() - bitset.count() &&
-                            bf_index_wrapper_ptr != nullptr && !hnsw_cfg.disable_fallback_brute_force.value()) {
+                            bf_index_wrapper_ptr != nullptr && !IsHnswBruteForceDisabledByEnv() &&
+                            !hnsw_cfg.disable_fallback_brute_force.value()) {
                             LOG_KNOWHERE_WARNING_ << "required topk: " << k
                                                   << ", but the actual num of results got from hnsw: " << real_topk
                                                   << ", trigger brute force search as fallback for hnsw search";
