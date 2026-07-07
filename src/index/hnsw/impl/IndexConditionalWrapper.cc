@@ -20,6 +20,7 @@
 #include "index/hnsw/impl/IndexBruteForceWrapper.h"
 #include "index/hnsw/impl/IndexHNSWWrapper.h"
 #include "index/hnsw/impl/IndexWrapperCosine.h"
+#include "index/hnsw/impl/hnsw_brute_force_env.h"
 #include "knowhere/utils.h"
 
 #if defined(NOT_COMPILE_FOR_SWIG) && !defined(KNOWHERE_WITH_LIGHT)
@@ -36,6 +37,10 @@ WhetherPerformBruteForceSearch(const faiss::Index* index, const BaseConfig& cfg,
     // check if parameters have all we need
     if (!cfg.k.has_value() || index == nullptr) {
         return std::nullopt;
+    }
+
+    if (IsHnswBruteForceDisabledByEnv()) {
+        return false;
     }
 
     // decide
@@ -69,6 +74,10 @@ WhetherPerformBruteForceRangeSearch(const faiss::Index* index, const FaissHnswCo
     // check if parameters have all we need
     if (!cfg.ef.has_value() || index == nullptr) {
         return std::nullopt;
+    }
+
+    if (IsHnswBruteForceDisabledByEnv()) {
+        return false;
     }
 
     // decide

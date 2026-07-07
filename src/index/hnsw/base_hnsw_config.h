@@ -31,8 +31,7 @@ class BaseHnswConfig : public BaseConfig {
     CFG_INT efConstruction;
     CFG_INT ef;
     CFG_INT overview_levels;
-    CFG_BOOL disable_fallback_brute_force;  // default is false, means we will use fallback brute force when hnsw search
-                                            // does not get enough topk results
+    CFG_BOOL disable_fallback_brute_force;  // per-query override (see also KNOWHERE_DISABLE_HNSW_BRUTE_FORCE env)
     KNOHWERE_DECLARE_CONFIG(BaseHnswConfig) {
         KNOWHERE_CONFIG_DECLARE_FIELD(M).description("hnsw M").set_default(30).set_range(2, 2048).for_train();
         KNOWHERE_CONFIG_DECLARE_FIELD(efConstruction)
