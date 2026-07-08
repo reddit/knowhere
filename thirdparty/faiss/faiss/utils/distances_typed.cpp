@@ -219,6 +219,11 @@ void knn_inner_product_typed(
         if (const auto* sel_bs =
                     dynamic_cast<const knowhere::BitsetViewIDSelector*>(sel)) {
             exhaustive_inner_product_impl_typed(x, y, d, nx, ny, res, *sel_bs);
+        } else if (
+                const auto* sel_array =
+                        dynamic_cast<const IDSelectorArray*>(sel)) {
+            exhaustive_inner_product_impl_typed(
+                    x, y, d, nx, ny, res, *sel_array);
         } else if (sel == nullptr) {
             exhaustive_inner_product_impl_typed(
                     x, y, d, nx, ny, res, IDSelectorAll());
@@ -230,6 +235,11 @@ void knn_inner_product_typed(
         if (const auto* sel_bs =
                     dynamic_cast<const knowhere::BitsetViewIDSelector*>(sel)) {
             exhaustive_inner_product_impl_typed(x, y, d, nx, ny, res, *sel_bs);
+        } else if (
+                const auto* sel_array =
+                        dynamic_cast<const IDSelectorArray*>(sel)) {
+            exhaustive_inner_product_impl_typed(
+                    x, y, d, nx, ny, res, *sel_array);
         } else if (sel == nullptr) {
             exhaustive_inner_product_impl_typed(
                     x, y, d, nx, ny, res, IDSelectorAll());
@@ -261,6 +271,9 @@ void all_inner_product_typed(
     if (const auto* sel_bs =
                 dynamic_cast<const knowhere::BitsetViewIDSelector*>(sel)) {
         exhaustive_inner_product_impl_typed(x, y, d, nx, ny, res, *sel_bs);
+    } else if (
+            const auto* sel_array = dynamic_cast<const IDSelectorArray*>(sel)) {
+        exhaustive_inner_product_impl_typed(x, y, d, nx, ny, res, *sel_array);
     } else if (sel == nullptr) {
         exhaustive_inner_product_impl_typed(
                 x, y, d, nx, ny, res, IDSelectorAll());
@@ -283,6 +296,9 @@ void all_inner_product_distances_typed(
     if (const auto* sel_bs =
                 dynamic_cast<const knowhere::BitsetViewIDSelector*>(sel)) {
         exhaustive_inner_product_impl_typed(x, y, d, nx, ny, res, *sel_bs);
+    } else if (
+            const auto* sel_array = dynamic_cast<const IDSelectorArray*>(sel)) {
+        exhaustive_inner_product_impl_typed(x, y, d, nx, ny, res, *sel_array);
     } else if (sel == nullptr) {
         exhaustive_inner_product_impl_typed(
                 x, y, d, nx, ny, res, IDSelectorAll());
@@ -535,6 +551,9 @@ void range_search_inner_product_typed(
     if (const auto* sel_bs =
                 dynamic_cast<const knowhere::BitsetViewIDSelector*>(sel)) {
         exhaustive_inner_product_impl_typed(x, y, d, nx, ny, resh, *sel_bs);
+    } else if (
+            const auto* sel_array = dynamic_cast<const IDSelectorArray*>(sel)) {
+        exhaustive_inner_product_impl_typed(x, y, d, nx, ny, resh, *sel_array);
     } else if (sel == nullptr) {
         exhaustive_inner_product_impl_typed(
                 x, y, d, nx, ny, resh, IDSelectorAll());
