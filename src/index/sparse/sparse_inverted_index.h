@@ -241,7 +241,7 @@ class InvertedIndex : public BaseInvertedIndex<DType> {
         writeBinaryPOD(writer, n_rows_internal_);
         writeBinaryPOD(writer, max_dim_);
         writeBinaryPOD(writer, deprecated_value_threshold);
-        BitsetView bitset(nullptr, 0);
+        BitsetView bitset(static_cast<const uint8_t*>(nullptr), 0);
 
         auto dim_map_reverse = std::unordered_map<uint32_t, table_t>();
         for (const auto& [dim, dim_id] : dim_map_) {

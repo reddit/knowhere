@@ -30,6 +30,9 @@ else()
 endif()
 
 add_executable(knowhere_tests ${KNOWHERE_UT_SRCS})
+if(APPLE)
+  target_compile_options(knowhere_tests PRIVATE "-include" "${CMAKE_SOURCE_DIR}/cmake/macos_folly_compat.h")
+endif()
 
 find_package(Catch2)
 if (NOT Catch2_FOUND)
@@ -49,6 +52,7 @@ set_target_properties(knowhere_tests PROPERTIES
 
 target_link_libraries(knowhere_tests PRIVATE
         Catch2::Catch2WithMain
-        atomic
-        stdc++fs
         knowhere)
+if(NOT APPLE)
+  target_link_libraries(knowhere_tests PRIVATE atomic stdc++fs)
+endif()

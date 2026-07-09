@@ -94,6 +94,8 @@ class KnowhereConan(ConanFile):
     def configure(self):
         if self.options.shared:
             self.options.rm_safe("fPIC")
+        if self.settings.os == "Macos":
+            self.options["abseil"].shared = True
 
     def requirements(self):
         self.requires("boost/1.83.0")
@@ -102,19 +104,22 @@ class KnowhereConan(ConanFile):
         self.requires("nlohmann_json/3.11.2")
         self.requires("openssl/1.1.1t")
         self.requires("prometheus-cpp/1.1.0")
-        self.requires("zlib/1.2.12")
+        self.requires("zlib/1.2.13")
         self.requires("double-conversion/3.2.1")
         self.requires("xz_utils/5.2.5")
         self.requires("protobuf/3.21.4")
+        self.requires("abseil/20230125.3")
+        self.requires("grpc/1.50.1@milvus/dev")
         self.requires("fmt/9.1.0")
         self.requires("folly/2023.10.30.10@milvus/dev")
         self.requires("libcurl/8.2.1")
         self.requires("simde/0.8.2")
         self.requires("xxhash/0.8.3")
+        self.requires("roaring/3.0.0")
         if self.settings.os == "Android":
             self.requires("openblas/0.3.27")
         if not self.options.with_light:
-            self.requires("opentelemetry-cpp/1.8.1.1@milvus/dev")
+            self.requires("opentelemetry-cpp/1.8.1.1@milvus/2.4")
         if self.settings.os not in ["Macos", "Android"]:
             self.requires("libunwind/1.7.2")
         if self.options.with_ut:
@@ -186,6 +191,20 @@ class KnowhereConan(ConanFile):
         tc.variables["WITH_LIGHT"] = self.options.with_light
         tc.variables["WITH_COMPILE_PRUNE"] = self.options.with_compile_prune
 
+        if self.settings.os == "Macos":
+            libomp_prefix = os.environ.get("LIBOMP_PREFIX")
+            for prefix in [libomp_prefix, "/opt/homebrew/opt/libomp", "/usr/local/opt/libomp"]:
+                if prefix and os.path.exists(os.path.join(prefix, "include", "omp.h")):
+                    libomp_include = os.path.join(prefix, "include")
+                    libomp_library = os.path.join(prefix, "lib", "libomp.dylib")
+                    openmp_flags = f"-fopenmp=libomp -I{libomp_include}"
+                    tc.variables["OpenMP_C_FLAGS"] = openmp_flags
+                    tc.variables["OpenMP_CXX_FLAGS"] = openmp_flags
+                    tc.variables["OpenMP_C_LIB_NAMES"] = "omp"
+                    tc.variables["OpenMP_CXX_LIB_NAMES"] = "omp"
+                    tc.variables["OpenMP_omp_LIBRARY"] = libomp_library
+                    break
+
         # Configure ccache
         tc.variables["CMAKE_CXX_COMPILER_LAUNCHER"] = "ccache"
         tc.variables["CMAKE_C_COMPILER_LAUNCHER"] = "ccache"
@@ -222,6 +241,7 @@ class KnowhereConan(ConanFile):
             "glog::glog",
             "prometheus-cpp::core",
             "prometheus-cpp::push",
+            "roaring::roaring",
         ]
 
         self.cpp_info.filenames["cmake_find_package"] = "knowhere"

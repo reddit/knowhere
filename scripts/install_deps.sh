@@ -20,6 +20,8 @@
 set -e
 
 UNAME="$(uname -s)"
+CONAN_REMOTE_NAME="default-conan-local"
+CONAN_REMOTE_URL="https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local"
 
 case "${UNAME}" in
     Linux*)     MACHINE=Linux;;
@@ -29,6 +31,15 @@ case "${UNAME}" in
     *)          MACHINE="UNKNOWN:${UNAME}"
 esac
 
+add_or_update_conan_remote() {
+    if conan remote list | grep -q "^${CONAN_REMOTE_NAME}: ${CONAN_REMOTE_URL} "; then
+        return
+    elif conan remote list | grep -q "^${CONAN_REMOTE_NAME}:"; then
+        conan remote update "${CONAN_REMOTE_NAME}" "${CONAN_REMOTE_URL}"
+    else
+        conan remote add "${CONAN_REMOTE_NAME}" "${CONAN_REMOTE_URL}"
+    fi
+}
 
 if [[ "${MACHINE}" == "Linux" ]]; then
     if [[ -x "$(command -v apt)" ]]; then
@@ -45,7 +56,7 @@ if [[ "${MACHINE}" == "Linux" ]]; then
         sudo apt-get install -y libboost-program-options-dev
         sudo apt-get install -y libaio-dev
         pip3 install conan==1.61.0
-        conan remote add default-conan-local https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local
+        add_or_update_conan_remote
         # Pre-installation of openblas can save about 15 minutes of openblas building time.
         # But the apt-installed openblas version is 0.2.20, while the latest openblas version is 0.3.19.
         # So we only pre-install openblas in Unittest, and compile openblas-0.3.19 when release.
@@ -96,14 +107,14 @@ if [[ "${MACHINE}" == "Linux" ]]; then
         tar -zxvf cmake-3.22.2-linux-x86_64.tar.gz && \
         sudo ln -sf $(pwd)/cmake-3.22.2-linux-x86_64/bin/cmake /usr/bin/cmake
         pip3 install conan==1.61.0
-        conan remote add default-conan-local https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local
+        add_or_update_conan_remote
     fi
 fi
 
 if [[ "${MACHINE}" == "Mac"  ]]; then
     brew install libomp llvm ninja openblas
     pip3 install conan==1.61.0
-    conan remote add default-conan-local https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local
+    add_or_update_conan_remote
 fi
 
 if [[ "${MACHINE}" == "MinGw"  ]]; then

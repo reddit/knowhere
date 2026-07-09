@@ -127,8 +127,10 @@ struct GpuCuvsIndexNode : public IndexNode {
                 auto rows = dataset->GetRows();
                 auto dim = dataset->GetDim();
                 auto const* data = reinterpret_cast<const data_type*>(dataset->GetTensor());
+                auto dense_bitset = bitset.is_dense() ? std::vector<uint8_t>{} : bitset.ToDense();
+                auto bitset_data = bitset.is_dense() ? bitset.data() : dense_bitset.data();
                 auto search_result =
-                    index_.search(cuvs_cfg, data, rows, dim, bitset.data(), bitset.byte_size(), bitset.size());
+                    index_.search(cuvs_cfg, data, rows, dim, bitset_data, bitset.byte_size(), bitset.size());
                 std::this_thread::yield();
                 index_.synchronize();
                 return GenResultDataSet(rows, cuvs_cfg.k, std::get<0>(search_result), std::get<1>(search_result));

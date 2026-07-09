@@ -247,7 +247,7 @@ if(__AARCH64)
 
   add_dependencies(faiss knowhere_utils)
   target_link_libraries(faiss PUBLIC OpenMP::OpenMP_CXX ${BLAS_LIBRARIES} ${LAPACK_LIBRARIES}
-                                     knowhere_utils)
+                                     knowhere_utils roaring::roaring)
   target_compile_definitions(faiss PRIVATE FINTEGER=int)
 endif()
 
