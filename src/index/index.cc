@@ -133,14 +133,11 @@ Index<T>::Search(const DataSetPtr dataset, const Json& json, const BitsetView& b
         return expected<DataSetPtr>::Err(Status::invalid_args, msg);
     }
 
-    BitsetView bitset;
+    BitsetView bitset = bitset_;
     if (bitset_.count() == 0) {
         // traverse bitset to get the filtered out num
         auto filtered_out_num = bitset_.get_filtered_out_num_();
-        bitset = BitsetView(bitset_.data(), bitset_.size(), filtered_out_num);
-    } else {
-        // if bitset has filtered out num, use it
-        bitset = bitset_;
+        bitset.set_count(filtered_out_num);
     }
 
 #if defined(NOT_COMPILE_FOR_SWIG) && !defined(KNOWHERE_WITH_LIGHT)
@@ -202,7 +199,10 @@ Index<T>::AnnIterator(const DataSetPtr dataset, const Json& json, const BitsetVi
         return expected<std::vector<std::shared_ptr<IndexNode::iterator>>>::Err(Status::invalid_args, msg);
     }
 
-    const auto bitset = BitsetView(bitset_.data(), bitset_.size(), bitset_.get_filtered_out_num_());
+    auto bitset = bitset_;
+    if (bitset.count() == 0) {
+        bitset.set_count(bitset.get_filtered_out_num_());
+    }
 
 #if defined(NOT_COMPILE_FOR_SWIG) && !defined(KNOWHERE_WITH_LIGHT)
     // note that this time includes only the initial search phase of iterator.
@@ -240,7 +240,10 @@ Index<T>::RangeSearch(const DataSetPtr dataset, const Json& json, const BitsetVi
         return expected<DataSetPtr>::Err(Status::invalid_args, msg);
     }
 
-    const auto bitset = BitsetView(bitset_.data(), bitset_.size(), bitset_.get_filtered_out_num_());
+    auto bitset = bitset_;
+    if (bitset.count() == 0) {
+        bitset.set_count(bitset.get_filtered_out_num_());
+    }
 
 #if defined(NOT_COMPILE_FOR_SWIG) && !defined(KNOWHERE_WITH_LIGHT)
     const BaseConfig& b_cfg = static_cast<const BaseConfig&>(*cfg);
