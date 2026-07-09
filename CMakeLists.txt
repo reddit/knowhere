@@ -113,6 +113,10 @@ find_package(xxHash REQUIRED)
 include_directories(${xxHash_INCLUDE_DIRS})
 find_package(simde REQUIRED)
 
+if(APPLE)
+  add_compile_definitions(BOOST_STACKTRACE_GNU_SOURCE_NOT_REQUIRED)
+endif()
+
 if(NOT WITH_LIGHT)
   find_package(opentelemetry-cpp REQUIRED)
 endif()
@@ -211,6 +215,9 @@ list(APPEND KNOWHERE_LINKER_LIBS simde::simde)
 
 add_library(knowhere SHARED ${KNOWHERE_SRCS})
 add_dependencies(knowhere ${KNOWHERE_LINKER_LIBS})
+if(APPLE)
+  target_compile_options(knowhere PRIVATE "-include" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/macos_folly_compat.h")
+endif()
 if(WITH_CUVS)
   list(
     APPEND
