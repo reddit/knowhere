@@ -13,6 +13,8 @@
 // the License
 
 #include <algorithm>
+#include <memory>
+#include <vector>
 
 #include <faiss/impl/IDSelector.h>
 #include <faiss/impl/ResultHandler.h>
@@ -24,6 +26,61 @@
 #include "simd/hook.h"
 namespace faiss {
 namespace {
+bool make_roaring_valid_ids(
+        const knowhere::BitsetView& bitset_view,
+        size_t ny,
+        std::vector<idx_t>& ids) {
+    ids.clear();
+    if (!bitset_view.can_iterate_roaring_without_mapping()) {
+        return false;
+    }
+
+    const uint64_t range_start = bitset_view.id_offset();
+    const uint64_t range_end = range_start + ny;
+    std::unique_ptr<roaring_bitmap_t, decltype(&roaring_bitmap_free)> range(
+            roaring_bitmap_from_range(range_start, range_end, 1),
+            roaring_bitmap_free);
+    if (range == nullptr) {
+        return false;
+    }
+    std::unique_ptr<roaring_bitmap_t, decltype(&roaring_bitmap_free)> selected(
+            roaring_bitmap_andnot(range.get(), bitset_view.roaring()),
+            roaring_bitmap_free);
+    if (selected == nullptr) {
+        return false;
+    }
+
+    const auto nselected = roaring_bitmap_get_cardinality(selected.get());
+    ids.resize(nselected);
+    std::vector<uint32_t> selected_ids(nselected);
+    roaring_bitmap_to_uint32_array(selected.get(), selected_ids.data());
+    for (size_t i = 0; i < nselected; ++i) {
+        ids[i] = static_cast<idx_t>(selected_ids[i] - range_start);
+    }
+    return true;
+}
+
+template <class Fn>
+void dispatch_typed_with_roaring_fast_path(
+        const IDSelector* sel,
+        size_t ny,
+        Fn&& fn) {
+    if (const auto* sel_bs =
+                dynamic_cast<const knowhere::BitsetViewIDSelector*>(sel)) {
+        std::vector<idx_t> roaring_ids;
+        if (make_roaring_valid_ids(sel_bs->bitset_view, ny, roaring_ids)) {
+            IDSelectorArray sel_array(roaring_ids.size(), roaring_ids.data());
+            fn(sel_array);
+        } else {
+            fn(*sel_bs);
+        }
+    } else if (sel == nullptr) {
+        fn(IDSelectorAll());
+    } else {
+        fn(*sel);
+    }
+}
+
 template <typename DataType, class BlockResultHandler, class IDSelector>
 void exhaustive_inner_product_impl_typed(
         const DataType* __restrict x,
