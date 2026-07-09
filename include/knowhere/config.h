@@ -245,7 +245,7 @@ struct Entry<CFG_MATERIALIZED_VIEW_SEARCH_INFO_TYPE> {
 template <typename T>
 class EntryAccess {
  public:
-    EntryAccess(Entry<T>* entry) : entry(entry){};
+    EntryAccess(Entry<T>* entry) : entry(entry) {};
 
     EntryAccess&
     set_default(const typename T::value_type dft) {
@@ -634,6 +634,13 @@ class BaseConfig : public Config {
     CFG_FLOAT retrieval_ann_ratio;
     CFG_STRING emb_list_meta_file_path;    // for mmap
     CFG_STRING emb_list_offset_file_path;  // for build
+
+    static CFG_INT::value_type
+    HardwareConcurrency() {
+        static const auto hardware_concurrency = static_cast<CFG_INT::value_type>(std::thread::hardware_concurrency());
+        return hardware_concurrency;
+    }
+
     KNOHWERE_DECLARE_CONFIG(BaseConfig) {
         KNOWHERE_CONFIG_DECLARE_FIELD(dim).allow_empty_without_default().description("vector dim").for_train();
         KNOWHERE_CONFIG_DECLARE_FIELD(metric_type)
@@ -670,7 +677,7 @@ class BaseConfig : public Config {
         KNOWHERE_CONFIG_DECLARE_FIELD(num_build_thread)
             .description("index thread limit for build.")
             .allow_empty_without_default()
-            .set_range(1, std::thread::hardware_concurrency())
+            .set_range(1, HardwareConcurrency())
             .for_train();
         KNOWHERE_CONFIG_DECLARE_FIELD(radius)
             .set_default(0.0)

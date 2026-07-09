@@ -189,6 +189,7 @@ if(__X86_64)
   target_compile_options(faiss_avx2 PRIVATE $<$<COMPILE_LANGUAGE:CXX>: -msse4.2
                                             -mavx2 -mfma -mf16c -mpopcnt>)
   target_include_directories(faiss_avx2 PRIVATE ${Boost_INCLUDE_DIRS})
+  target_link_libraries(faiss_avx2 PUBLIC roaring::roaring)
   add_library(faiss_avx512 OBJECT ${FAISS_AVX512_SRCS})
   target_compile_options(
     faiss_avx512
@@ -203,6 +204,7 @@ if(__X86_64)
             -mavx512vl
             -mpopcnt>)
   target_include_directories(faiss_avx512 PRIVATE ${Boost_INCLUDE_DIRS})
+  target_link_libraries(faiss_avx512 PUBLIC roaring::roaring)
 
   add_library(faiss STATIC ${FAISS_SRCS})
   target_include_directories(faiss PRIVATE ${Boost_INCLUDE_DIRS})
