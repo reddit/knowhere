@@ -136,7 +136,27 @@ endif()
 
 include(cmake/utils/platform_check.cmake)
 include(cmake/utils/compile_flags.cmake)
-find_package(milvus-common REQUIRED)
+# milvus-common can be provided two ways:
+#  - standalone knowhere build: Conan supplies it and find_package() defines the
+#    imported target milvus-common::milvus-common.
+#  - embedded in Milvus: Milvus adds milvus-common via add_subdirectory() BEFORE
+#    knowhere, creating a plain in-tree `milvus-common` target. In that case
+#    find_package() would fail (no installed config file), so reuse the existing
+#    target and alias it to the namespaced name the rest of the tree links to.
+if(NOT TARGET milvus-common::milvus-common)
+  if(TARGET milvus-common)
+    add_library(milvus-common::milvus-common ALIAS milvus-common)
+    # In-tree milvus-common only uses directory-scoped include_directories() and
+    # does not export PUBLIC/INTERFACE include dirs, so linking the alias alone
+    # does not make filemanager/FileManager.h visible to knowhere. Milvus sets
+    # MILVUS_COMMON_INCLUDE_DIR when it FetchContent-populates milvus-common.
+    if(DEFINED MILVUS_COMMON_INCLUDE_DIR)
+      include_directories(${MILVUS_COMMON_INCLUDE_DIR})
+    endif()
+  else()
+    find_package(milvus-common REQUIRED)
+  endif()
+endif()
 include(cmake/libs/libhnsw.cmake)
 include(cmake/libs/libfaiss.cmake)
 

@@ -127,9 +127,10 @@ StartSpan(const std::string& name, TraceContext* ctx) {
             return noop_trace_provider->GetTracer("noop")->StartSpan("noop");
         }
 
-        opts.parent = trace::SpanContext(trace::TraceId({ctx->traceID, trace::TraceId::kSize}),
-                                         trace::SpanId({ctx->spanID, trace::SpanId::kSize}),
-                                         trace::TraceFlags(ctx->traceFlags), true);
+        opts.parent = trace::SpanContext(
+            trace::TraceId(nostd::span<const uint8_t, trace::TraceId::kSize>{ctx->traceID, trace::TraceId::kSize}),
+            trace::SpanId(nostd::span<const uint8_t, trace::SpanId::kSize>{ctx->spanID, trace::SpanId::kSize}),
+            trace::TraceFlags(ctx->traceFlags), true);
     }
     return GetTracer()->StartSpan(name, opts);
 }

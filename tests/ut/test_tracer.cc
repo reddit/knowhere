@@ -111,8 +111,11 @@ TEST_CASE("Test Tracer span", "Span test") {
 
     auto span = StartSpan("test", ctx.get());
     auto spanCtx = span->GetContext();
-    REQUIRE(spanCtx.trace_id() == trace::TraceId({ctx->traceID, trace::TraceId::kSize}));
-    // REQUIRE(spanCtx.span_id() == trace::SpanId({ctx->spanID, trace::SpanId::kSize}));
+    REQUIRE(spanCtx.trace_id() == trace::TraceId(opentelemetry::nostd::span<const uint8_t, trace::TraceId::kSize>{
+                                      ctx->traceID, trace::TraceId::kSize}));
+    // REQUIRE(spanCtx.span_id() ==
+    //         trace::SpanId(opentelemetry::nostd::span<const uint8_t, trace::SpanId::kSize>{
+    //             ctx->spanID, trace::SpanId::kSize}));
     REQUIRE(spanCtx.trace_flags() == trace::TraceFlags(ctx->traceFlags));
 
     auto trace_id_hex = BytesToHexStr(ctx->traceID, TraceId::kSize);

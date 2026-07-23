@@ -355,9 +355,18 @@ if(APPLE)
   find_package(LAPACK REQUIRED)
   find_package(BLAS REQUIRED)
 else()
-  find_package(OpenBLAS CONFIG REQUIRED)
-  set(BLAS_LIBRARIES OpenBLAS::OpenBLAS)
-  set(LAPACK_LIBRARIES OpenBLAS::OpenBLAS)
+  # Prefer OpenBLAS's CMake config package when present, but fall back to
+  # module-mode BLAS/LAPACK discovery so builds work on environments that ship
+  # libopenblas without OpenBLASConfig.cmake.
+  find_package(OpenBLAS CONFIG QUIET)
+  if(OpenBLAS_FOUND)
+    set(BLAS_LIBRARIES OpenBLAS::OpenBLAS)
+    set(LAPACK_LIBRARIES OpenBLAS::OpenBLAS)
+  else()
+    set(BLA_VENDOR OpenBLAS)
+    find_package(BLAS REQUIRED)
+    find_package(LAPACK REQUIRED)
+  endif()
 endif()
 
 find_package(xxHash REQUIRED)
