@@ -169,8 +169,18 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Android" AND CMAKE_SYSTEM_PROCESSOR STREQUAL "aar
   find_package(OpenBLAS REQUIRED)
   set(BLAS_LIBRARIES OpenBLAS::OpenBLAS)
 else()
-  find_package(LAPACK REQUIRED)
-  find_package(BLAS REQUIRED)
+  # Prefer OpenBLAS's CMake config package when present, but fall back to
+  # module-mode BLAS/LAPACK discovery so builds work on environments that ship
+  # libopenblas without OpenBLASConfig.cmake. The per-platform BLA_VENDOR set
+  # above (Apple / OpenBLAS) drives the module-mode fallback.
+  find_package(OpenBLAS CONFIG QUIET)
+  if(OpenBLAS_FOUND)
+    set(BLAS_LIBRARIES OpenBLAS::OpenBLAS)
+    set(LAPACK_LIBRARIES OpenBLAS::OpenBLAS)
+  else()
+    find_package(LAPACK REQUIRED)
+    find_package(BLAS REQUIRED)
+  endif()
 endif()
 
 find_package(xxHash REQUIRED)
