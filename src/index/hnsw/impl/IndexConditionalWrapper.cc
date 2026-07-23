@@ -39,6 +39,14 @@ WhetherPerformBruteForceSearch(const faiss::Index* index, const BaseConfig& cfg,
         return std::nullopt;
     }
 
+    // an explicit user request to force brute force overrides the heuristics below
+    const auto* hnsw_cfg = dynamic_cast<const BaseHnswConfig*>(&cfg);
+    if (hnsw_cfg != nullptr && hnsw_cfg->force_brute_force.has_value() && hnsw_cfg->force_brute_force.value()) {
+        LOG_KNOWHERE_INFO_ << "force_brute_force enabled: bypassing HNSW graph traversal for exhaustive search (k="
+                           << cfg.k.value() << ", ntotal=" << index->ntotal << ")";
+        return true;
+    }
+
     // decide
     const auto k = cfg.k.value();
 
@@ -70,6 +78,14 @@ WhetherPerformBruteForceRangeSearch(const faiss::Index* index, const FaissHnswCo
     // check if parameters have all we need
     if (!cfg.ef.has_value() || index == nullptr) {
         return std::nullopt;
+    }
+
+    // an explicit user request to force brute force overrides the heuristics below
+    if (cfg.force_brute_force.has_value() && cfg.force_brute_force.value()) {
+        LOG_KNOWHERE_INFO_
+            << "force_brute_force enabled: bypassing HNSW graph traversal for exhaustive range search (ef="
+            << cfg.ef.value() << ", ntotal=" << index->ntotal << ")";
+        return true;
     }
 
     // decide
