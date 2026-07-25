@@ -35,8 +35,12 @@ if ( NOT milvus-common_POPULATED )
     add_subdirectory( ${milvus-common_SOURCE_DIR}
                       ${milvus-common_BINARY_DIR} )
 
-    # Link atomic library to milvus-common to fix atomic operations
-    target_link_libraries(milvus-common PUBLIC atomic)
+    # Link atomic library to milvus-common to fix atomic operations.
+    # libatomic is a GCC/Linux runtime; it does not exist on macOS (clang
+    # provides atomics intrinsically), so linking -latomic there fails.
+    if(NOT APPLE)
+        target_link_libraries(milvus-common PUBLIC atomic)
+    endif()
 endif()
 
 set( MILVUS_COMMON_INCLUDE_DIR ${milvus-common_SOURCE_DIR}/include CACHE INTERNAL "Path to milvus-common include directory" )

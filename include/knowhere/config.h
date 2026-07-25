@@ -574,6 +574,9 @@ class Config {
 };
 
 #define KNOHWERE_DECLARE_CONFIG(CONFIG) CONFIG()
+// Alias for the correctly-spelled macro name (the original above has a typo:
+// "KNOHWERE"). Both names are supported so either spelling compiles.
+#define KNOWHERE_DECLARE_CONFIG(CONFIG) KNOHWERE_DECLARE_CONFIG(CONFIG)
 
 #define KNOWHERE_CONFIG_DECLARE_FIELD(PARAM)                                                                     \
     __DICT__[#PARAM] = knowhere::Config::VarEntry(std::in_place_type<knowhere::Entry<decltype(PARAM)>>, &PARAM); \

@@ -96,6 +96,30 @@ endif()
 find_package(Boost REQUIRED)
 include_directories(${Boost_INCLUDE_DIRS})
 
+# On macOS, Apple/Homebrew clang has no built-in OpenMP; point FindOpenMP at
+# Homebrew's libomp so find_package(OpenMP) succeeds without the caller (e.g.
+# CLion) having to pass -DOpenMP_* flags. Respects values already provided.
+if(APPLE AND NOT OpenMP_CXX_FLAGS)
+  find_program(BREW_EXECUTABLE brew)
+  if(BREW_EXECUTABLE)
+    execute_process(COMMAND ${BREW_EXECUTABLE} --prefix libomp
+                    OUTPUT_VARIABLE LIBOMP_PREFIX OUTPUT_STRIP_TRAILING_WHITESPACE
+                    ERROR_QUIET)
+  endif()
+  if((NOT LIBOMP_PREFIX) AND (EXISTS "/opt/homebrew/opt/libomp"))
+    set(LIBOMP_PREFIX "/opt/homebrew/opt/libomp")
+  elseif((NOT LIBOMP_PREFIX) AND (EXISTS "/usr/local/opt/libomp"))
+    set(LIBOMP_PREFIX "/usr/local/opt/libomp")
+  endif()
+  if(LIBOMP_PREFIX)
+    set(OpenMP_C_FLAGS "-Xclang -fopenmp -I${LIBOMP_PREFIX}/include")
+    set(OpenMP_C_LIB_NAMES "omp")
+    set(OpenMP_CXX_FLAGS "-Xclang -fopenmp -I${LIBOMP_PREFIX}/include")
+    set(OpenMP_CXX_LIB_NAMES "omp")
+    set(OpenMP_omp_LIBRARY "${LIBOMP_PREFIX}/lib/libomp.dylib")
+  endif()
+endif()
+
 find_package(OpenMP REQUIRED)
 
 find_package(folly REQUIRED)
@@ -125,6 +149,24 @@ if(OPENMP_FOUND)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
   set(CMAKE_EXE_LINKER_FLAGS
       "${CMAKE_EXE_LINKER_FLAGS} ${OpenMP_EXE_LINKER_FLAGS}")
+endif()
+
+if(APPLE)
+  # Knowhere is normally built inside milvus, which supplies these macOS flags
+  # via internal/core/CMakeLists.txt. When building standalone we need them too:
+  # Boost.Stacktrace (pulled in by milvus-common's EasyAssert) requires
+  # _GNU_SOURCE on Linux; on macOS _Unwind_Backtrace is available without it.
+  # -D_DARWIN_C_SOURCE exposes BSD symbols; -Wl,-no_fixup_chains works around
+  # the stricter macOS 14+ (Sonoma) linker.
+  add_compile_definitions(BOOST_STACKTRACE_GNU_SOURCE_NOT_REQUIRED=1 _DARWIN_C_SOURCE)
+  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,-no_fixup_chains")
+  set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-no_fixup_chains")
+  # knowhere and milvus-common call omp_* directly. Unlike gcc's -fopenmp on
+  # Linux, clang's "-Xclang -fopenmp" (from find_package(OpenMP)) enables OpenMP
+  # but does NOT auto-link the runtime, so link libomp into every target here.
+  if(OpenMP_omp_LIBRARY)
+    link_libraries(${OpenMP_omp_LIBRARY})
+  endif()
 endif()
 
 include(cmake/utils/platform_check.cmake)

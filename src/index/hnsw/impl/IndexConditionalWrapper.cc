@@ -43,7 +43,6 @@ WhetherPerformBruteForceSearch(const faiss::Index* index, const BaseConfig& cfg,
     if (hnsw_cfg != nullptr && hnsw_cfg->force_brute_force.has_value() && hnsw_cfg->force_brute_force.value()) {
         return true;
     }
-
     // decide
     const auto k = cfg.k.value();
 

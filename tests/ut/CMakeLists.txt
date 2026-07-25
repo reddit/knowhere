@@ -49,6 +49,10 @@ set_target_properties(knowhere_tests PROPERTIES
 
 target_link_libraries(knowhere_tests PRIVATE
         Catch2::Catch2WithMain
-        atomic
-        stdc++fs
         knowhere)
+
+# libatomic and libstdc++fs are GCC/Linux runtimes; on macOS clang/libc++
+# provides atomics and std::filesystem directly, so these libs don't exist.
+if(NOT APPLE)
+    target_link_libraries(knowhere_tests PRIVATE atomic stdc++fs)
+endif()
