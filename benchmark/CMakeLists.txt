@@ -38,8 +38,12 @@ macro(benchmark_test target file)
     add_executable(${target} ${FILE_SRCS})
     target_link_libraries(${target} ${depend_libs} ${unittest_libs})
 
-    # this is needed for clang in Debug compilation mode
-    target_link_libraries(${target} atomic)
+    # This is needed for clang in Debug compilation mode on platforms that
+    # provide atomic operations in a separate library. Apple platforms provide
+    # them through the system runtime.
+    if(NOT APPLE)
+        target_link_libraries(${target} atomic)
+    endif()
 
     install(TARGETS ${target} DESTINATION unittest)
 endmacro()
