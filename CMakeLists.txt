@@ -146,6 +146,13 @@ include(cmake/utils/compile_flags.cmake)
 if(NOT TARGET milvus-common::milvus-common)
   if(TARGET milvus-common)
     add_library(milvus-common::milvus-common ALIAS milvus-common)
+    # In-tree milvus-common only uses directory-scoped include_directories() and
+    # does not export PUBLIC/INTERFACE include dirs, so linking the alias alone
+    # does not make filemanager/FileManager.h visible to knowhere. Milvus sets
+    # MILVUS_COMMON_INCLUDE_DIR when it FetchContent-populates milvus-common.
+    if(DEFINED MILVUS_COMMON_INCLUDE_DIR)
+      include_directories(${MILVUS_COMMON_INCLUDE_DIR})
+    endif()
   else()
     find_package(milvus-common REQUIRED)
   endif()
