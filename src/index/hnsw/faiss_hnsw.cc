@@ -1460,6 +1460,12 @@ class BaseFaissRegularIndexHNSWNode : public BaseFaissRegularIndexNode {
                 knowhere::knowhere_hnsw_search_pool_queue_latency.Observe(stats.search_pool_queue_latency);
             }
 #endif
+
+            if (hnsw_cfg.force_brute_force.value_or(false)) {
+                LOG_KNOWHERE_DEBUG_ << "force_brute_force: completed exhaustive search for " << rows
+                                    << " queries (k=" << k << ", ntotal=" << indexes[index_id]->ntotal
+                                    << ", used_bf_wrapper=" << whether_bf_search.value_or(false) << ")";
+            }
         } catch (const std::exception& e) {
             LOG_KNOWHERE_WARNING_ << "faiss inner error: " << e.what();
             return expected<DataSetPtr>::Err(Status::faiss_inner_error, e.what());
