@@ -25,12 +25,12 @@ namespace faiss {
 namespace cppcontrib {
 namespace knowhere {
 
-// C is CMax<> or CMin<>
-template<typename C, typename DistanceComputerT, typename FilterT>
-void brute_force_search_impl(
-    const idx_t ntotal,
+// C is CMax<> or CMin<>. visit_candidates invokes the supplied callable once
+// for every id that should participate in the search.
+template<typename C, typename DistanceComputerT, typename CandidateVisitorT>
+void brute_force_search_candidates_impl(
     DistanceComputerT& __restrict qdis,
-    const FilterT& __restrict filter,
+    CandidateVisitorT&& visit_candidates,
     const idx_t k,
     float* __restrict distances,
     idx_t* __restrict labels
@@ -40,17 +40,15 @@ void brute_force_search_impl(
 
     auto max_heap = std::make_unique<std::pair<float, idx_t>[]>(k);
     idx_t n_added = 0;
-    for (idx_t idx = 0; idx < ntotal; ++idx) {
-        if (filter.is_member(idx)) {
-            const float distance = qdis(idx);
-            if (n_added < k) {
-                n_added += 1;
-                heap_push<C>(n_added, max_heap.get(), distance, idx);
-            } else if (C::cmp(max_heap[0].first, distance)) {
-                heap_replace_top<C>(k, max_heap.get(), distance, idx);
-            }
+    visit_candidates([&](idx_t idx) {
+        const float distance = qdis(idx);
+        if (n_added < k) {
+            n_added += 1;
+            heap_push<C>(n_added, max_heap.get(), distance, idx);
+        } else if (C::cmp(max_heap[0].first, distance)) {
+            heap_replace_top<C>(k, max_heap.get(), distance, idx);
         }
-    }
+    });
 
     const idx_t len = std::min(n_added, idx_t(k));
     for (idx_t i = 0; i < len; i++) {
@@ -67,6 +65,30 @@ void brute_force_search_impl(
             distances[idx] = C::neutral();
         }
     }
+}
+
+// C is CMax<> or CMin<>
+template<typename C, typename DistanceComputerT, typename FilterT>
+void brute_force_search_impl(
+    const idx_t ntotal,
+    DistanceComputerT& __restrict qdis,
+    const FilterT& __restrict filter,
+    const idx_t k,
+    float* __restrict distances,
+    idx_t* __restrict labels
+) {
+    brute_force_search_candidates_impl<C>(
+        qdis,
+        [&](auto&& visit) {
+            for (idx_t idx = 0; idx < ntotal; ++idx) {
+                if (filter.is_member(idx)) {
+                    visit(idx);
+                }
+            }
+        },
+        k,
+        distances,
+        labels);
 }
 
 // C is CMax<> or CMin<>

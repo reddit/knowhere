@@ -2626,3 +2626,59 @@ TEST_CASE("HNSW force_brute_force forces exhaustive search", "[faiss_hnsw][brute
         REQUIRE(recall_forced >= 0.9f);
     }
 }
+
+TEST_CASE("HNSW brute force iterates valid Roaring complement", "[faiss_hnsw][brute_force][roaring]") {
+    const int32_t nb = 256;
+    const int32_t dim = 16;
+    const int32_t nq = 1;
+    const int32_t topk = 5;
+    const std::vector<uint32_t> valid_ids = {3, 19, 57, 101, 211};
+
+    auto train_ds = GenDataSet(nb, dim, /*seed=*/42);
+    auto query_ds = GenDataSet(nq, dim, /*seed=*/43);
+    const auto version = knowhere::Version::GetCurrentVersion().VersionNumber();
+
+    for (const auto& metric : {knowhere::metric::L2, knowhere::metric::IP}) {
+        CAPTURE(metric);
+
+        knowhere::Json conf;
+        conf[knowhere::meta::INDEX_TYPE] = knowhere::IndexEnum::INDEX_HNSW;
+        conf[knowhere::meta::METRIC_TYPE] = metric;
+        conf[knowhere::meta::DIM] = dim;
+        conf[knowhere::meta::ROWS] = nb;
+        conf[knowhere::meta::TOPK] = topk;
+        conf[knowhere::indexparam::HNSW_M] = 16;
+        conf[knowhere::indexparam::EFCONSTRUCTION] = 96;
+        conf[knowhere::indexparam::EF] = topk;
+        conf["force_brute_force"] = true;
+
+        auto index =
+            knowhere::IndexFactory::Instance().Create<knowhere::fp32>(knowhere::IndexEnum::INDEX_HNSW, version).value();
+        REQUIRE(index.Build(train_ds, conf) == knowhere::Status::success);
+
+        std::vector<uint8_t> dense((nb + 7) / 8, 0xff);
+        auto* roaring = roaring_bitmap_create();
+        REQUIRE(roaring != nullptr);
+        for (uint32_t id = 0; id < nb; ++id) {
+            if (std::find(valid_ids.begin(), valid_ids.end(), id) == valid_ids.end()) {
+                roaring_bitmap_add(roaring, id);
+            } else {
+                dense[id >> 3] &= static_cast<uint8_t>(~(1U << (id & 7)));
+            }
+        }
+
+        const size_t excluded_count = nb - valid_ids.size();
+        knowhere::BitsetView dense_view(dense.data(), nb, excluded_count);
+        knowhere::BitsetView roaring_view(roaring, nb, excluded_count);
+        auto dense_result = index.Search(query_ds, conf, dense_view);
+        auto roaring_result = index.Search(query_ds, conf, roaring_view);
+        roaring_bitmap_free(roaring);
+
+        REQUIRE(dense_result.has_value());
+        REQUIRE(roaring_result.has_value());
+        for (int32_t i = 0; i < topk; ++i) {
+            REQUIRE(roaring_result.value()->GetIds()[i] == dense_result.value()->GetIds()[i]);
+            REQUIRE(roaring_result.value()->GetDistance()[i] == Catch::Approx(dense_result.value()->GetDistance()[i]));
+        }
+    }
+}

@@ -20,6 +20,8 @@
 #include <faiss/impl/ResultHandler.h>
 
 #include <algorithm>
+#include <cstdint>
+#include <limits>
 #include <memory>
 
 #include "knowhere/bitsetview.h"
@@ -44,6 +46,47 @@ struct BitsetViewIDSelectorWrapper final {
     }
 };
 
+using RoaringBitmapPtr = std::unique_ptr<roaring_bitmap_t, decltype(&roaring_bitmap_free)>;
+
+RoaringBitmapPtr
+MakeValidRoaringBitmap(const BitsetView& bitset_view, idx_t ntotal) {
+    if (!bitset_view.can_iterate_roaring_without_mapping() || ntotal < 0) {
+        return {nullptr, roaring_bitmap_free};
+    }
+
+    const uint64_t range_start = bitset_view.id_offset();
+    const uint64_t range_end = range_start + static_cast<uint64_t>(ntotal);
+    constexpr uint64_t kRoaringUniverseEnd = uint64_t{std::numeric_limits<uint32_t>::max()} + 1;
+    if (range_end < range_start || range_end > kRoaringUniverseEnd) {
+        return {nullptr, roaring_bitmap_free};
+    }
+
+    RoaringBitmapPtr valid_ids(roaring_bitmap_from_range(range_start, range_end, 1), roaring_bitmap_free);
+    if (valid_ids != nullptr) {
+        roaring_bitmap_andnot_inplace(valid_ids.get(), bitset_view.roaring());
+    }
+    return valid_ids;
+}
+
+template<typename C>
+void
+SearchValidRoaringIds(const roaring_bitmap_t* valid_ids, uint64_t id_offset, faiss::DistanceComputer& dis, idx_t k,
+                      float* distances, idx_t* labels) {
+    faiss::cppcontrib::knowhere::brute_force_search_candidates_impl<C>(
+        dis,
+        [&](auto&& visit) {
+            roaring_uint32_iterator_t iterator;
+            roaring_iterator_init(valid_ids, &iterator);
+            while (iterator.has_value) {
+                visit(static_cast<idx_t>(static_cast<uint64_t>(iterator.current_value) - id_offset));
+                roaring_uint32_iterator_advance(&iterator);
+            }
+        },
+        k,
+        distances,
+        labels);
+}
+
 //
 IndexBruteForceWrapper::IndexBruteForceWrapper(faiss::Index* underlying_index)
     : faiss::cppcontrib::knowhere::IndexWrapper{underlying_index} {
@@ -57,6 +100,13 @@ IndexBruteForceWrapper::search(faiss::idx_t n, const float* __restrict x, faiss:
 
     std::unique_ptr<faiss::DistanceComputer> dis(index->get_distance_computer());
 
+    faiss::IDSelector* sel = (params == nullptr) ? nullptr : params->sel;
+    const auto* bw_idselector = dynamic_cast<const knowhere::BitsetViewIDSelector*>(sel);
+    RoaringBitmapPtr valid_roaring_ids(nullptr, roaring_bitmap_free);
+    if (bw_idselector && !bw_idselector->bitset_view.empty()) {
+        valid_roaring_ids = MakeValidRoaringBitmap(bw_idselector->bitset_view, index->ntotal);
+    }
+
     // no parallelism by design
     for (idx_t i = 0; i < n; i++) {
         // prepare the query
@@ -66,16 +116,17 @@ IndexBruteForceWrapper::search(faiss::idx_t n, const float* __restrict x, faiss:
         idx_t* const __restrict local_ids = labels + i * index->d;
         float* const __restrict local_distances = distances + i * index->d;
 
-        // set up a filter
-        faiss::IDSelector* sel = (params == nullptr) ? nullptr : params->sel;
-
         if (is_similarity_metric(index->metric_type)) {
             using C = faiss::CMin<float, idx_t>;
 
+            if (valid_roaring_ids != nullptr) {
+                SearchValidRoaringIds<C>(valid_roaring_ids.get(), bw_idselector->bitset_view.id_offset(), *dis, k,
+                                         local_distances, local_ids);
+                continue;
+            }
+
             // try knowhere-specific filter
-            if (const knowhere::BitsetViewIDSelector* __restrict bw_idselector =
-                    dynamic_cast<const knowhere::BitsetViewIDSelector*>(sel);
-                bw_idselector && !bw_idselector->bitset_view.empty()) {
+            if (bw_idselector && !bw_idselector->bitset_view.empty()) {
                 BitsetViewIDSelectorWrapper bw_idselector_w(bw_idselector->bitset_view);
 
                 faiss::cppcontrib::knowhere::brute_force_search_impl<C, faiss::DistanceComputer,
@@ -89,10 +140,14 @@ IndexBruteForceWrapper::search(faiss::idx_t n, const float* __restrict x, faiss:
         } else {
             using C = faiss::CMax<float, idx_t>;
 
+            if (valid_roaring_ids != nullptr) {
+                SearchValidRoaringIds<C>(valid_roaring_ids.get(), bw_idselector->bitset_view.id_offset(), *dis, k,
+                                         local_distances, local_ids);
+                continue;
+            }
+
             // try knowhere-specific filter
-            if (const knowhere::BitsetViewIDSelector* __restrict bw_idselector =
-                    dynamic_cast<const knowhere::BitsetViewIDSelector*>(sel);
-                bw_idselector && !bw_idselector->bitset_view.empty()) {
+            if (bw_idselector && !bw_idselector->bitset_view.empty()) {
                 BitsetViewIDSelectorWrapper bw_idselector_w(bw_idselector->bitset_view);
 
                 faiss::cppcontrib::knowhere::brute_force_search_impl<C, faiss::DistanceComputer,
