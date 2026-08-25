@@ -194,6 +194,12 @@ if(NOT WITH_CUVS)
   knowhere_file_glob(GLOB_RECURSE KNOWHERE_CUVS_SRCS src/common/cuvs/*.cu
                      src/common/cuvs/*.cc src/index/gpu_cuvs/*.cc)
   list(REMOVE_ITEM KNOWHERE_SRCS ${KNOWHERE_CUVS_SRCS})
+else()
+  # GPU builds already register GPU_CAGRA via gpu_cuvs. The CPU-only loader
+  # must not be compiled there or factory registration asserts on duplicates.
+  knowhere_file_glob(GLOB_RECURSE KNOWHERE_GPU_CAGRA_CPU_SRCS
+                     src/index/gpu_cagra_cpu/*.cc)
+  list(REMOVE_ITEM KNOWHERE_SRCS ${KNOWHERE_GPU_CAGRA_CPU_SRCS})
 endif()
 
 include_directories(src)

@@ -318,6 +318,8 @@ TEST_CASE("Test index feature check", "[IndexFeatureCheck]") {
         REQUIRE(IndexFactory::Instance().FeatureCheck(IndexEnum::INDEX_CUVS_IVFFLAT, knowhere::feature::GPU));
         REQUIRE(IndexFactory::Instance().FeatureCheck(IndexEnum::INDEX_CUVS_IVFPQ, knowhere::feature::GPU));
         REQUIRE(IndexFactory::Instance().FeatureCheck(IndexEnum::INDEX_CUVS_CAGRA, knowhere::feature::GPU));
+#else
+        REQUIRE_FALSE(IndexFactory::Instance().FeatureCheck(IndexEnum::INDEX_GPU_CAGRA, knowhere::feature::GPU));
 #endif
 
         REQUIRE_FALSE(IndexFactory::Instance().FeatureCheck(IndexEnum::INDEX_FAISS_IDMAP, knowhere::feature::GPU));
@@ -454,6 +456,12 @@ TEST_CASE("Test index feature check", "[IndexFeatureCheck]") {
         REQUIRE(IndexFactory::Instance().FeatureCheck(IndexEnum::INDEX_CUVS_CAGRA, knowhere::feature::BINARY));
         REQUIRE_FALSE(
             IndexFactory::Instance().FeatureCheck(IndexEnum::INDEX_CUVS_CAGRA, knowhere::feature::SPARSE_U32_F32));
+#else
+        REQUIRE(IndexFactory::Instance().FeatureCheck(IndexEnum::INDEX_GPU_CAGRA, knowhere::feature::FLOAT32));
+        REQUIRE(IndexFactory::Instance().FeatureCheck(IndexEnum::INDEX_GPU_CAGRA, knowhere::feature::FP16));
+        REQUIRE_FALSE(IndexFactory::Instance().FeatureCheck(IndexEnum::INDEX_GPU_CAGRA, knowhere::feature::GPU));
+        REQUIRE(IndexFactory::Instance().FeatureCheck(IndexEnum::INDEX_CUVS_CAGRA, knowhere::feature::FLOAT32));
+        REQUIRE_FALSE(IndexFactory::Instance().FeatureCheck(IndexEnum::INDEX_CUVS_CAGRA, knowhere::feature::GPU));
 #endif
 
         // DiskANN Index
